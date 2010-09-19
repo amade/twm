@@ -62,6 +62,7 @@ in this Software without prior written authorization from The Open Group.
  ***********************************************************************/
 
 #include <stdio.h>
+#include <string.h>
 #include <X11/Xos.h>
 #include "twm.h"
 #include "gc.h"
@@ -111,8 +112,10 @@ static struct {
 static Cursor LastCursor;
 
 static Bool belongs_to_twm_window ( TwmWindow *t, Window w );
-static void Identify ( TwmWindow *t );
 static void send_clientmessage ( Window w, Atom a, Time timestamp );
+
+static void HideIconManager ( IconMgr *ip );
+static void ShowIconManager ( IconMgr *ip );
 
 #define SHADOWWIDTH 5			/* in pixels */
 
@@ -352,18 +355,72 @@ void InitTitlebarButtons ()
 
 
 
+/**
+ * Do all the necessary stuff to create titlebar top-left/top-right
+ * corner shape masks. Called once, during screen initialisation on startup.
+ */
+void InitTitlebarCorners (void)
+{
+#define RoundedCorner3x3_width  3
+#define RoundedCorner3x3_height 3
+    static unsigned char RoundedCornerLeft3x3_bits[]  = {0x07, 0x01, 0x01};
+    static unsigned char RoundedCornerRight3x3_bits[] = {0x07, 0x04, 0x04};
+
+    if (Scr->RoundedTitle == TRUE)
+    {
+	Scr->Tcorner.left = XCreatePixmapFromBitmapData (dpy, Scr->Root,
+		(char*)RoundedCornerLeft3x3_bits,
+		RoundedCorner3x3_width, RoundedCorner3x3_height,
+		WhitePixel(dpy, Scr->screen), BlackPixel(dpy, Scr->screen), 1);
+	Scr->Tcorner.right = XCreatePixmapFromBitmapData (dpy, Scr->Root,
+		(char*)RoundedCornerRight3x3_bits,
+		RoundedCorner3x3_width, RoundedCorner3x3_height,
+		WhitePixel(dpy, Scr->screen), BlackPixel(dpy, Scr->screen), 1);
+	Scr->Tcorner.width = RoundedCorner3x3_width;
+	Scr->Tcorner.height = RoundedCorner3x3_height;
+	if (Scr->Tcorner.left == None || Scr->Tcorner.right == None)
+	    Scr->RoundedTitle = FALSE;
+    }
+}
+
+
+
 void
 PaintEntry(MenuRoot *mr, MenuItem *mi, int exposure)
 {
     int y_offset;
     int text_y;
-    GC gc;
+
+#ifdef TWM_USE_RENDER
+    Picture pic_win;
+    if (Scr->use_xrender == TRUE)
+	pic_win = XRenderCreatePicture (dpy, mr->w.win, Scr->FormatRGB, CPGraphicsExposure, &Scr->PicAttr);
+#endif
 
 #ifdef DEBUG_MENUS
     fprintf(stderr, "Paint entry\n");
 #endif
     y_offset = mi->item_num * Scr->EntryHeight;
+#ifdef TWM_USE_SPACING
+    if (mi->func == F_TITLE)
+	text_y = y_offset + Scr->MenuTitleFont.y
+			+ (Scr->EntryHeight - Scr->MenuTitleFont.height) / 2;
+    else
+	text_y = y_offset + Scr->MenuFont.y		/*text vertically centered*/
+			+ (Scr->EntryHeight - Scr->MenuFont.height) / 2;
+#else
     text_y = y_offset + Scr->MenuFont.y;
+#endif
+
+#ifdef TWM_USE_RENDER
+    if (Scr->use_xrender == TRUE)
+    {
+	if (mr->backingstore != None)
+	    XCopyArea (dpy, mr->backingstore, mr->w.win, Scr->NormalGC, 0, y_offset, mr->width, Scr->EntryHeight, 0, y_offset);
+	else if (Scr->XCompMgrRunning == TRUE)
+	    XRenderFillRectangle (dpy, PictOpSrc, pic_win, &Scr->XRcol32Clear, 0, y_offset, mr->width, Scr->EntryHeight);
+    }
+#endif
 
     if (mi->func != F_TITLE)
     {
@@ -371,77 +428,113 @@ PaintEntry(MenuRoot *mr, MenuItem *mi, int exposure)
 
 	if (mi->state)
 	{
-	    XSetForeground(dpy, Scr->NormalGC, mi->hi_back);
+#ifdef TWM_USE_RENDER
+	    if (Scr->use_xrender == TRUE)
+		XRenderFillRectangle (dpy, PictOpOver, pic_win, &mi->XRcolMenuHiB, 0, y_offset, mr->width, Scr->EntryHeight);
+	    else
+#endif
+	    {
+		XSetForeground(dpy, Scr->NormalGC, mi->MenuHiC.back);
+		XFillRectangle(dpy, mr->w.win, Scr->NormalGC, 0, y_offset,
+				mr->width, Scr->EntryHeight);
+	    }
 
-	    XFillRectangle(dpy, mr->w, Scr->NormalGC, 0, y_offset,
-		mr->width, Scr->EntryHeight);
-
-	    MyFont_ChangeGC(mi->hi_fore, mi->hi_back, &Scr->MenuFont);
-
-	    MyFont_DrawString(dpy, mr->w, &Scr->MenuFont, Scr->NormalGC, mi->x,
+	    MyFont_DrawString(&mr->w, &Scr->MenuFont, &mi->MenuHiC, mi->x,
 		text_y, mi->item, mi->strlen);
 
-	    gc = Scr->NormalGC;
+#ifdef TWM_USE_XFT
+	    /*
+	     * initialise NormalGC with color for XCopyPlane() later
+	     * ("non-TWM_USE_XFT" does it in MyFont_DrawString() already):
+	     */
+	    if (Scr->use_xft > 0)
+		FB(Scr, mi->MenuHiC.fore, mi->MenuHiC.back);
+#endif
 	}
 	else
 	{
 	    if (mi->user_colors || !exposure)
 	    {
-		XSetForeground(dpy, Scr->NormalGC, mi->back);
-
-		XFillRectangle(dpy, mr->w, Scr->NormalGC, 0, y_offset,
-		    mr->width, Scr->EntryHeight);
-
-		MyFont_ChangeGC(mi->fore, mi->back, &Scr->MenuFont);
-		gc = Scr->NormalGC;
+#ifdef TWM_USE_RENDER
+		if (Scr->use_xrender == TRUE)
+		    XRenderFillRectangle (dpy, PictOpOver, pic_win, &mi->XRcolMenuB, 0, y_offset, mr->width, Scr->EntryHeight);
+		else
+#endif
+		{
+		    XSetForeground(dpy, Scr->NormalGC, mi->MenuC.back);
+		    XFillRectangle(dpy, mr->w.win, Scr->NormalGC, 0, y_offset,
+				    mr->width, Scr->EntryHeight);
+		}
 	    }
-	    else
-		gc = Scr->MenuGC;
 
-	    MyFont_DrawString(dpy, mr->w, &Scr->MenuFont, gc, 
-		    mi->x, text_y, mi->item, mi->strlen);
+	    /* MyFont_DrawString() sets NormalGC: */
+	    MyFont_DrawString(&mr->w, &Scr->MenuFont, &mi->MenuC,
+		mi->x, text_y, mi->item, mi->strlen);
 
+#ifdef TWM_USE_XFT
+	    if (Scr->use_xft > 0)
+		FB(Scr, mi->MenuC.fore, mi->MenuC.back);
+#endif
 	}
 
 	if (mi->func == F_MENU)
 	{
-	    /* create the pull right pixmap if needed */
-	    if (Scr->pullPm == None)
-	    {
-		Scr->pullPm = CreateMenuIcon (Scr->MenuFont.height,
-					     &Scr->pullW, &Scr->pullH);
-	    }
+#ifdef TWM_USE_SPACING
+	    x = mr->width - Scr->pullW - Scr->MenuFont.height/3;
+	    y = y_offset	/*submenu iconic knob vertically centered*/
+			+ (Scr->EntryHeight - Scr->pullH) / 2;
+#else
 	    x = mr->width - Scr->pullW - 5;
 	    y = y_offset + ((Scr->MenuFont.height - Scr->pullH) / 2);
-	    XCopyPlane(dpy, Scr->pullPm, mr->w, gc, 0, 0,
-		Scr->pullW, Scr->pullH, x, y, 1);
+#endif
+	    x = mr->width - Scr->pullW - 5;
+	    y = y_offset + ((Scr->MenuFont.height - Scr->pullH) / 2);
+
+#ifdef TWM_USE_RENDER
+	    if (Scr->use_xrender == TRUE)
+		XRenderComposite (dpy, PictOpOver, (mi->state?mi->PenMenuHiF:mi->PenMenuF), Scr->PenpullPm, pic_win, 0, 0, 0, 0, x, y, Scr->pullW, Scr->pullH);
+	    else
+#endif
+		XCopyPlane(dpy, Scr->pullPm, mr->w.win, Scr->NormalGC, 0, 0,
+				Scr->pullW, Scr->pullH, x, y, 1);
 	}
     }
     else
     {
 	int y;
 
-	XSetForeground(dpy, Scr->NormalGC, mi->back);
-
-	/* fill the rectangle with the title background color */
-	XFillRectangle(dpy, mr->w, Scr->NormalGC, 0, y_offset,
-	    mr->width, Scr->EntryHeight);
-
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE)
+	    XRenderFillRectangle (dpy, PictOpOver, pic_win, &mi->XRcolMenuB, 0, y_offset, mr->width, Scr->EntryHeight);
+	else
+#endif
 	{
-	    XSetForeground(dpy, Scr->NormalGC, mi->fore);
-	    /* now draw the dividing lines */
-	    if (y_offset)
-	      XDrawLine (dpy, mr->w, Scr->NormalGC, 0, y_offset,
-			 mr->width, y_offset);
-	    y = ((mi->item_num+1) * Scr->EntryHeight)-1;
-	    XDrawLine(dpy, mr->w, Scr->NormalGC, 0, y, mr->width, y);
+	    /* fill the rectangle with the title background color */
+	    XSetForeground(dpy, Scr->NormalGC, mi->MenuC.back);
+	    XFillRectangle(dpy, mr->w.win, Scr->NormalGC, 0, y_offset,
+				mr->width, Scr->EntryHeight);
 	}
 
-	MyFont_ChangeGC(mi->fore, mi->back, &Scr->MenuFont);
+	if (Scr->MenuBorderWidth > 0) /*draw separator only if menu has border*/
+	{
+	    XSetForeground(dpy, Scr->NormalGC, Scr->MenuBorderColor);
+	    /* now draw the dividing lines */
+	    if (y_offset)
+	      XDrawLine (dpy, mr->w.win, Scr->NormalGC, 0, y_offset,
+			 mr->width, y_offset);
+	    y = ((mi->item_num+1) * Scr->EntryHeight)-1;
+	    XDrawLine(dpy, mr->w.win, Scr->NormalGC, 0, y, mr->width, y);
+	}
+
 	/* finally render the title */
-	MyFont_DrawString(dpy, mr->w, &Scr->MenuFont, Scr->NormalGC, mi->x,
+	MyFont_DrawString(&mr->w, &Scr->MenuTitleFont, &mi->MenuC, mi->x,
 	    text_y, mi->item, mi->strlen);
     }
+
+#ifdef TWM_USE_RENDER
+    if (Scr->use_xrender == TRUE)
+	XRenderFreePicture (dpy, pic_win);
+#endif
 }
     
 
@@ -460,7 +553,17 @@ PaintMenu(MenuRoot *mr, XEvent *e)
 	if (e->xexpose.y < (y_offset + Scr->EntryHeight) &&
 	    (e->xexpose.y + e->xexpose.height) > y_offset)
 	{
-	    PaintEntry(mr, mi, True);
+#ifdef TWM_USE_RENDER
+	    if (Scr->use_xrender == TRUE)
+		PaintEntry(mr, mi, False);
+	    else /* fallthrough */
+#endif
+#ifdef TWM_USE_XFT
+	    if (Scr->use_xft > 0)
+		PaintEntry(mr, mi, False); /* enforce clear area first */
+	    else
+#endif
+		PaintEntry(mr, mi, True);
 	}
     }
     XSync(dpy, 0);
@@ -511,14 +614,14 @@ UpdateMenu()
 	    continue;
 
 	done = FALSE;
-	XQueryPointer( dpy, ActiveMenu->w, &JunkRoot, &JunkChild,
+	XQueryPointer( dpy, ActiveMenu->w.win, &JunkRoot, &JunkChild,
 	    &x_root, &y_root, &x, &y, &JunkMask);
 
 	/* if we haven't recieved the enter notify yet, wait */
 	if (ActiveMenu && !ActiveMenu->entered)
 	    continue;
 
-	XFindContext(dpy, ActiveMenu->w, ScreenContext, (caddr_t *)&Scr);
+	XFindContext(dpy, ActiveMenu->w.win, ScreenContext, (caddr_t *)&Scr);
 
 	if (x < 0 || y < 0 ||
 	    x >= ActiveMenu->width || y >= ActiveMenu->height)
@@ -571,16 +674,36 @@ UpdateMenu()
 	}
 
 	/* now check to see if we were over the arrow of a pull right entry */
-	if (ActiveItem->func == F_MENU && 
-	    ((ActiveMenu->width - x) < (ActiveMenu->width >> 1)))
+#ifdef TWM_USE_RENDER
+	i = ActiveMenu->width;
+#if 0
+	if (Scr->XCompMgrRunning == FALSE)
+	    i -= Scr->pullW;
+#endif
+#ifdef TWM_USE_SPACING
+	i -= Scr->MenuFont.height/3;
+#else
+	i -= 5;
+#endif
+#else
+	i = (ActiveMenu->width >> 1);
+#endif
+	if (ActiveItem->func == F_MENU && x >= i)
 	{
 	    MenuRoot *save = ActiveMenu;
 	    int savex = MenuOrigins[MenuDepth - 1].x; 
 	    int savey = MenuOrigins[MenuDepth - 1].y;
 
 	    if (MenuDepth < MAXMENUDEPTH) {
+#ifdef TWM_USE_RENDER
+		if (ActiveItem->state) {
+		    ActiveItem->state = 0;
+		    PaintEntry (ActiveMenu, ActiveItem, False);
+		    ActiveItem->state = 1;
+		}
+#endif
 		PopUpMenu (ActiveItem->sub, 
-			   (savex + (ActiveMenu->width >> 1)), 
+			   (savex + i + 1),
 			   (savey + ActiveItem->item_num * Scr->EntryHeight)
 			   /*(savey + ActiveItem->item_num * Scr->EntryHeight +
 			    (Scr->EntryHeight >> 1))*/, False);
@@ -593,7 +716,9 @@ UpdateMenu()
 	    if (save != ActiveMenu && ActiveItem->state)
 	    {
 		ActiveItem->state = 0;
+#ifndef TWM_USE_RENDER
 		PaintEntry(save, ActiveItem, False);
+#endif
 		ActiveItem = NULL;
 	    }
 	}
@@ -617,9 +742,9 @@ NewMenuRoot(char *name)
 
 #define UNUSED_PIXEL ((unsigned long) (~0))	/* more than 24 bits */
 
-    tmp = (MenuRoot *) malloc(sizeof(MenuRoot));
-    tmp->hi_fore = UNUSED_PIXEL;
-    tmp->hi_back = UNUSED_PIXEL;
+    tmp = (MenuRoot *) calloc (1, sizeof(MenuRoot));
+    tmp->MenuHiC.fore = UNUSED_PIXEL;
+    tmp->MenuHiC.back = UNUSED_PIXEL;
     tmp->name = name;
     tmp->prev = NULL;
     tmp->first = NULL;
@@ -628,8 +753,11 @@ NewMenuRoot(char *name)
     tmp->width = 0;
     tmp->mapped = NEVER_MAPPED;
     tmp->pull = FALSE;
-    tmp->w = None;
+    tmp->w.win = None;
     tmp->shadow = None;
+#ifdef TWM_USE_RENDER
+    tmp->backingstore = None;
+#endif
     tmp->real_menu = FALSE;
 
     if (Scr->MenuList == NULL)
@@ -704,6 +832,13 @@ AddToMenu(MenuRoot *menu, char *item, char *action, MenuRoot *sub, int func,
     tmp->state = 0;
     tmp->func = func;
 
+#ifdef TWM_USE_RENDER
+/*  tmp->XRcolMenuB = {0};
+    tmp->XRcolMenuHiB = {0};*/
+    tmp->PenMenuF = None;
+    tmp->PenMenuHiF = None;
+#endif
+
     if (!Scr->HaveFonts) CreateFonts();
     width = MyFont_TextWidth(&Scr->MenuFont, item, tmp->strlen);
     if (width <= 0)
@@ -718,8 +853,8 @@ AddToMenu(MenuRoot *menu, char *item, char *action, MenuRoot *sub, int func,
 
 	save = Scr->FirstTime;
 	Scr->FirstTime = TRUE;
-	GetColor(COLOR, &tmp->fore, fore);
-	GetColor(COLOR, &tmp->back, back);
+	GetColor(COLOR, &tmp->MenuC.fore, fore);
+	GetColor(COLOR, &tmp->MenuC.back, back);
 	Scr->FirstTime = save;
 	tmp->user_colors = TRUE;
     }
@@ -739,6 +874,40 @@ MakeMenus()
 {
     MenuRoot *mr;
 
+    if (Scr->Shadow == TRUE && 2*Scr->MenuBorderWidth >= SHADOWWIDTH)
+	Scr->Shadow = FALSE; /* Shadow window will be 100% obscured */
+
+    /* create the pull right pixmap if needed */
+    if (Scr->pullPm == None)
+	Scr->pullPm = CreateMenuIcon (Scr->MenuFont.height, &Scr->pullW, &Scr->pullH);
+
+#ifdef TWM_USE_RENDER
+    if (Scr->use_xrender == TRUE)
+    {
+	Pixmap pullPm = XCreatePixmap (dpy, Scr->Root, Scr->pullW, Scr->pullH, Scr->DepthA);
+	FBgc(Scr->AlphaGC, AllPlanes, 0);
+	XCopyPlane (dpy, Scr->pullPm, pullPm, Scr->AlphaGC, 0, 0, Scr->pullW, Scr->pullH, 0, 0, 1);
+	Scr->PenpullPm = XRenderCreatePicture (dpy, pullPm, XRenderFindStandardFormat (dpy, Scr->FormatA), CPGraphicsExposure, &Scr->PicAttr);
+	XFreePixmap (dpy, pullPm);
+    }
+    if (Scr->Shadow)
+    {
+	CopyPixelToXRenderColor (Scr->MenuShadowColor, &Scr->XRcolShadow);
+#ifdef TWM_USE_OPACITY
+	Scr->XRcolShadow.alpha = (Scr->MenuOpacity>>1) * 257; /* advance menu shadow transparency by 2 */
+	if (Scr->XRcolShadow.alpha < 0x2000)
+	    Scr->XRcolShadow.alpha = 0x2000; /* keep a very soft shadow */
+#else
+	Scr->XRcolShadow.alpha = 0x8000; /* opacity not configured anyways make shadows half-transparent */
+#endif
+	Scr->XRcolShadow.red = Scr->XRcolShadow.red * Scr->XRcolShadow.alpha / 0xffff; /* premultiply */
+	Scr->XRcolShadow.green = Scr->XRcolShadow.green * Scr->XRcolShadow.alpha / 0xffff;
+	Scr->XRcolShadow.blue = Scr->XRcolShadow.blue * Scr->XRcolShadow.alpha / 0xffff;
+    }
+    else
+	Scr->XRcolShadow.red = Scr->XRcolShadow.green = Scr->XRcolShadow.blue = Scr->XRcolShadow.alpha = 0;
+#endif
+
     for (mr = Scr->MenuList; mr != NULL; mr = mr->next)
     {
 	if (mr->real_menu == FALSE)
@@ -752,6 +921,9 @@ MakeMenus()
 void
 MakeMenu(MenuRoot *mr)
 {
+#ifdef TWM_USE_RENDER
+    XRenderColor xrcol;
+#endif
     MenuItem *start, *end, *cur, *tmp;
     XColor f1, f2, f3;
     XColor b1, b2, b3;
@@ -762,60 +934,88 @@ MakeMenu(MenuRoot *mr)
     int width;
     unsigned long valuemask;
     XSetWindowAttributes attributes;
-    Colormap cmap = Scr->TwmRoot.cmaps.cwins[0]->colormap->c;
+    Colormap cmap = Scr->TwmRoot.cmaps.cwins[Scr->TwmRoot.cmaps.number_cwins-1]->colormap->c;
 
+#ifdef TWM_USE_SPACING
+    Scr->EntryHeight = 120*Scr->MenuFont.height/100; /*baselineskip 1.2*/
+#else
     Scr->EntryHeight = Scr->MenuFont.height + 4;
+#endif
 
     /* lets first size the window accordingly */
     if (mr->mapped == NEVER_MAPPED)
     {
 	if (mr->pull == TRUE)
 	{
+#ifdef TWM_USE_SPACING
+	    mr->width += Scr->pullW + Scr->MenuFont.height/3;
+#else
 	    mr->width += 16 + 10;
+#endif
 	}
 
+#ifdef TWM_USE_SPACING
+	width = mr->width + 2*Scr->MenuFont.height/3;
+#else
 	width = mr->width + 10;
-
+#endif
 	for (cur = mr->first; cur != NULL; cur = cur->next)
 	{
 	    if (cur->func != F_TITLE)
+#ifdef TWM_USE_SPACING
+		cur->x = Scr->MenuFont.height/3;
+#else
 		cur->x = 5;
+#endif
 	    else
 	    {
-		cur->x = width - MyFont_TextWidth(&Scr->MenuFont, cur->item,
-		    cur->strlen);
+		cur->x = width - MyFont_TextWidth(&Scr->MenuTitleFont, cur->item, cur->strlen);
 		cur->x /= 2;
 	    }
 	}
 	mr->height = mr->items * Scr->EntryHeight;
-	mr->width += 10;
 
+#ifdef TWM_USE_SPACING
+	mr->width += 2*Scr->MenuFont.height/3;
+#else
+	mr->width += 10;
+#endif
 	if (Scr->Shadow)
 	{
 	    /*
 	     * Make sure that you don't draw into the shadow window or else
 	     * the background bits there will get saved
 	     */
-	    valuemask = (CWBackPixel | CWBorderPixel);
+	    valuemask = (CWColormap | CWBackPixel | CWBorderPixel | CWOverrideRedirect);
+	    attributes.colormap = Scr->TwmRoot.cmaps.cwins[Scr->TwmRoot.cmaps.number_cwins-1]->colormap->c;
 	    attributes.background_pixel = Scr->MenuShadowColor;
 	    attributes.border_pixel = Scr->MenuShadowColor;
+	    attributes.override_redirect = True;
 	    if (Scr->SaveUnder) {
 		valuemask |= CWSaveUnder;
 		attributes.save_under = True;
 	    }
+
+#ifdef TWM_USE_RENDER
+	    if (Scr->use_xrender == TRUE)
+		valuemask &= ~CWBackPixel;
+#endif
+
 	    mr->shadow = XCreateWindow (dpy, Scr->Root, 0, 0,
 					(unsigned int) mr->width, 
 					(unsigned int) mr->height,
 					(unsigned int)0,
-					CopyFromParent, 
+					Scr->d_depth,
 					(unsigned int) CopyFromParent,
-					(Visual *) CopyFromParent,
+					Scr->d_visual,
 					valuemask, &attributes);
 	}
 
-	valuemask = (CWBackPixel | CWBorderPixel | CWEventMask);
+	valuemask = (CWColormap | CWBackPixel | CWBorderPixel | CWOverrideRedirect | CWEventMask);
+	attributes.colormap = Scr->TwmRoot.cmaps.cwins[Scr->TwmRoot.cmaps.number_cwins-1]->colormap->c;
 	attributes.background_pixel = Scr->MenuC.back;
 	attributes.border_pixel = Scr->MenuBorderColor;
+	attributes.override_redirect = True;
 	attributes.event_mask = (ExposureMask | EnterWindowMask);
 	if (Scr->SaveUnder) {
 	    valuemask |= CWSaveUnder;
@@ -825,43 +1025,135 @@ MakeMenu(MenuRoot *mr)
 	    valuemask |= CWBackingStore;
 	    attributes.backing_store = Always;
 	}
-	mr->w = XCreateWindow (dpy, Scr->Root, 0, 0, (unsigned int) mr->width,
-			       (unsigned int) mr->height,
-			       (unsigned int) Scr->MenuBorderWidth,
-			       CopyFromParent, (unsigned int) CopyFromParent,
-			       (Visual *) CopyFromParent,
-			       valuemask, &attributes);
 
+/*#ifdef TWM_USE_OPACITY*/
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE) {
+	    valuemask &= ~CWBackPixel;
+	    if (Scr->XCompMgrRunning == TRUE)
+		mr->backingstore = None;
+	    else
+		mr->backingstore = XCreatePixmap (dpy, Scr->Root, mr->width, mr->height, Scr->d_depth);
+	}
+#endif
+/*#endif*/
 
-	XSaveContext(dpy, mr->w, MenuContext, (caddr_t)mr);
-	XSaveContext(dpy, mr->w, ScreenContext, (caddr_t)Scr);
+	mr->w.win = XCreateWindow (dpy, Scr->Root, 0, 0,
+				(unsigned int) mr->width,
+				(unsigned int) mr->height,
+				(unsigned int) Scr->MenuBorderWidth,
+				Scr->d_depth,
+				(unsigned int) CopyFromParent,
+				Scr->d_visual,
+				valuemask, &attributes);
+
+#ifdef TWM_USE_OPACITY
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == FALSE)
+#endif
+	{
+	    SetWindowOpacity (mr->w.win, Scr->MenuOpacity);
+	    if (Scr->Shadow)
+		SetWindowOpacity (mr->shadow, Scr->MenuOpacity>>3);
+	}
+#endif
+
+#ifdef TWM_USE_XFT
+	if (Scr->use_xft > 0)
+	    mr->w.xft = MyXftDrawCreate (mr->w.win);
+#endif
+
+	XSaveContext(dpy, mr->w.win, MenuContext, (caddr_t)mr);
+	XSaveContext(dpy, mr->w.win, ScreenContext, (caddr_t)Scr);
 
 	mr->mapped = UNMAPPED;
     }
+
+#if 1
+    /* only draw rounded corners if the first item is "menu title": */
+    if (Scr->RoundedTitle == TRUE && mr->first != NULL && mr->first->func == F_TITLE) {
+	XShapeCombineMask (dpy, mr->w.win, ShapeBounding,
+			-Scr->MenuBorderWidth, -Scr->MenuBorderWidth,
+			Scr->Tcorner.left, ShapeSubtract);
+	XShapeCombineMask (dpy, mr->w.win, ShapeBounding,
+			mr->width-Scr->Tcorner.width+Scr->MenuBorderWidth,
+			-Scr->MenuBorderWidth,
+			Scr->Tcorner.right, ShapeSubtract);
+	if (Scr->MenuBorderWidth != 0) {
+	    XShapeCombineMask (dpy, mr->w.win, ShapeClip, 0, 0,
+			Scr->Tcorner.left, ShapeSubtract);
+	    XShapeCombineMask (dpy, mr->w.win, ShapeClip,
+			mr->width-Scr->Tcorner.width, 0,
+			Scr->Tcorner.right, ShapeSubtract);
+	}
+	if (Scr->Shadow) {
+	    XShapeCombineMask (dpy, mr->shadow, ShapeBounding,
+			0, 0,
+			Scr->Tcorner.left, ShapeSubtract);
+	    XShapeCombineMask (dpy, mr->shadow, ShapeBounding,
+			mr->width-Scr->Tcorner.width, 0,
+			Scr->Tcorner.right, ShapeSubtract);
+	}
+    }
+#endif
 
     /* get the default colors into the menus */
     for (tmp = mr->first; tmp != NULL; tmp = tmp->next)
     {
 	if (!tmp->user_colors) {
 	    if (tmp->func != F_TITLE) {
-		tmp->fore = Scr->MenuC.fore;
-		tmp->back = Scr->MenuC.back;
+		tmp->MenuC = Scr->MenuC; /* menuitem default color */
 	    } else {
-		tmp->fore = Scr->MenuTitleC.fore;
-		tmp->back = Scr->MenuTitleC.back;
+		tmp->MenuC = Scr->MenuTitleC;
 	    }
 	}
 
-	if (mr->hi_fore != UNUSED_PIXEL)
+	if (mr->MenuHiC.fore != UNUSED_PIXEL)
 	{
-	    tmp->hi_fore = mr->hi_fore;
-	    tmp->hi_back = mr->hi_back;
+	    tmp->MenuHiC = mr->MenuHiC;
 	}
 	else
 	{
-	    tmp->hi_fore = tmp->back;
-	    tmp->hi_back = tmp->fore;
+	    tmp->MenuHiC.fore = tmp->MenuC.back;
+	    tmp->MenuHiC.back = tmp->MenuC.fore;
 	}
+#ifdef TWM_USE_XFT
+	if (Scr->use_xft > 0) {
+	    CopyPixelToXftColor (tmp->MenuC.fore, &tmp->MenuC.xft);
+	    CopyPixelToXftColor (tmp->MenuHiC.fore, &tmp->MenuHiC.xft);
+	}
+#endif
+
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE)
+	{
+	    CopyPixelToXRenderColor (tmp->MenuC.fore, &xrcol);
+	    tmp->PenMenuF = Create_Color_Pen (&xrcol);
+	    CopyPixelToXRenderColor (tmp->MenuHiC.fore, &xrcol);
+	    tmp->PenMenuHiF = Create_Color_Pen (&xrcol);
+	    CopyPixelToXRenderColor (tmp->MenuC.back, &tmp->XRcolMenuB);
+	    CopyPixelToXRenderColor (tmp->MenuHiC.back, &tmp->XRcolMenuHiB);
+#ifdef TWM_USE_OPACITY
+	    if (mr->backingstore != None || Scr->XCompMgrRunning == TRUE)
+	    {
+		if (tmp->func != F_TITLE) {
+		    tmp->XRcolMenuB.alpha = Scr->MenuOpacity * 257;
+		    tmp->XRcolMenuB.red = tmp->XRcolMenuB.red * tmp->XRcolMenuB.alpha / 0xffff; /* premultiply */
+		    tmp->XRcolMenuB.green = tmp->XRcolMenuB.green * tmp->XRcolMenuB.alpha / 0xffff;
+		    tmp->XRcolMenuB.blue = tmp->XRcolMenuB.blue * tmp->XRcolMenuB.alpha / 0xffff;
+		}
+#if 1
+		tmp->XRcolMenuHiB.alpha = ((3*255 + Scr->MenuOpacity)>>2) * 257;
+#else
+		tmp->XRcolMenuHiB.alpha = Scr->MenuOpacity * 257;
+#endif
+		tmp->XRcolMenuHiB.red = tmp->XRcolMenuHiB.red * tmp->XRcolMenuHiB.alpha / 0xffff; /* premultiply */
+		tmp->XRcolMenuHiB.green = tmp->XRcolMenuHiB.green * tmp->XRcolMenuHiB.alpha / 0xffff;
+		tmp->XRcolMenuHiB.blue = tmp->XRcolMenuHiB.blue * tmp->XRcolMenuHiB.alpha / 0xffff;
+	    }
+#endif
+	}
+#endif
     }
 
     if (Scr->Monochrome == MONOCHROME || !Scr->InterpolateMenuColors)
@@ -889,14 +1181,14 @@ MakeMenu(MenuRoot *mr)
 	/* we have a start and end to interpolate between */
 	num = end->item_num - start->item_num;
 
-	f1.pixel = start->fore;
+	f1.pixel = start->MenuC.fore;
 	XQueryColor(dpy, cmap, &f1);
-	f2.pixel = end->fore;
+	f2.pixel = end->MenuC.fore;
 	XQueryColor(dpy, cmap, &f2);
 
-	b1.pixel = start->back;
+	b1.pixel = start->MenuC.back;
 	XQueryColor(dpy, cmap, &b1);
-	b2.pixel = end->back;
+	b2.pixel = end->MenuC.back;
 	XQueryColor(dpy, cmap, &b2);
 
 	fred = ((int)f2.red - (int)f1.red) / num;
@@ -928,12 +1220,53 @@ MakeMenu(MenuRoot *mr)
 
 	    XAllocColor(dpy, cmap, &f3);
 	    XAllocColor(dpy, cmap, &b3);
-	    cur->hi_back = cur->fore = f3.pixel;
-	    cur->hi_fore = cur->back = b3.pixel;
+	    cur->MenuHiC.back = cur->MenuC.fore = f3.pixel;
+	    cur->MenuHiC.fore = cur->MenuC.back = b3.pixel;
 	    cur->user_colors = True;
 
 	    f3 = save_fore;
 	    b3 = save_back;
+#ifdef TWM_USE_XFT
+	    if (Scr->use_xft > 0) {
+		CopyPixelToXftColor (cur->MenuC.fore, &cur->MenuC.xft);
+		CopyPixelToXftColor (cur->MenuHiC.fore, &cur->MenuHiC.xft);
+	    }
+#endif
+
+#ifdef TWM_USE_RENDER
+	    if (Scr->use_xrender == TRUE)
+	    {
+		CopyPixelToXRenderColor (cur->MenuC.back, &cur->XRcolMenuB);
+		CopyPixelToXRenderColor (tmp->MenuHiC.back, &tmp->XRcolMenuHiB);
+#ifdef TWM_USE_OPACITY
+		if (mr->backingstore != None || Scr->XCompMgrRunning == TRUE)
+		{
+		    if (cur->func != F_TITLE) {
+			cur->XRcolMenuB.alpha = Scr->MenuOpacity * 257;
+			cur->XRcolMenuB.red = cur->XRcolMenuB.red * cur->XRcolMenuB.alpha / 0xffff; /* premultiply */
+			cur->XRcolMenuB.green = cur->XRcolMenuB.green * cur->XRcolMenuB.alpha / 0xffff;
+			cur->XRcolMenuB.blue = cur->XRcolMenuB.blue * cur->XRcolMenuB.alpha / 0xffff;
+		    }
+#if 1
+		    cur->XRcolMenuHiB.alpha = ((3*255 + Scr->MenuOpacity)>>2) * 257;
+#else
+		    cur->XRcolMenuHiB.alpha = Scr->MenuOpacity * 257;
+#endif
+		    cur->XRcolMenuHiB.red = cur->XRcolMenuHiB.red * cur->XRcolMenuHiB.alpha / 0xffff; /* premultiply */
+		    cur->XRcolMenuHiB.green = cur->XRcolMenuHiB.green * cur->XRcolMenuHiB.alpha / 0xffff;
+		    cur->XRcolMenuHiB.blue = cur->XRcolMenuHiB.blue * cur->XRcolMenuHiB.alpha / 0xffff;
+		}
+#endif
+		if (cur->PenMenuF != None)
+		    XRenderFreePicture (dpy, cur->PenMenuF);
+		if (cur->PenMenuHiF != None)
+		    XRenderFreePicture (dpy, cur->PenMenuHiF);
+		CopyPixelToXRenderColor (cur->MenuC.fore, &xrcol);
+		cur->PenMenuF = Create_Color_Pen (&xrcol);
+		CopyPixelToXRenderColor (cur->MenuHiC.fore, &xrcol);
+		cur->PenMenuHiF = Create_Color_Pen (&xrcol);
+	    }
+#endif
 	}
 	start = end;
     }
@@ -948,6 +1281,21 @@ MakeMenu(MenuRoot *mr)
  *  \param x,y    location of upper left of menu
  *  \param center whether or not to center horizontally over position
  */
+#ifdef TWM_USE_RENDER
+void RepaintTranslucentShadow (MenuRoot *menu)
+{
+    if (Scr->use_xrender == TRUE) {
+	Picture pic_win = XRenderCreatePicture (dpy, menu->shadow, Scr->FormatRGB, CPGraphicsExposure, &Scr->PicAttr);
+	int i = SHADOWWIDTH - (Scr->MenuBorderWidth<<1);
+	if (Scr->XCompMgrRunning == TRUE)
+	    XRenderFillRectangle (dpy, PictOpSrc, pic_win, &Scr->XRcol32Clear, 0, 0, menu->width, menu->height);
+	XRenderFillRectangle (dpy, PictOpOver, pic_win, &Scr->XRcolShadow, menu->width-i, 0, i, menu->height);
+	XRenderFillRectangle (dpy, PictOpOver, pic_win, &Scr->XRcolShadow, 0, menu->height-i, menu->width-i, i);
+	XRenderFreePicture (dpy, pic_win);
+    }
+}
+#endif
+
 Bool 
 PopUpMenu (MenuRoot *menu, int x, int y, Bool center)
 {
@@ -959,8 +1307,6 @@ PopUpMenu (MenuRoot *menu, int x, int y, Bool center)
       (Scr->CaseSensitive ? strcmp : XmuCompareISOLatin1);
 
     if (!menu) return False;
-
-    InstallRootColormap();
 
     if (menu == Scr->Windows)
     {
@@ -1013,7 +1359,7 @@ PopUpMenu (MenuRoot *menu, int x, int y, Bool center)
 	MakeMenu(menu);
     }
 
-    if (menu->w == None || menu->items == 0) return False;
+    if (menu->w.win == None || menu->items == 0) return False;
 
     /* Prevent recursively bringing up menus. */
     if (menu->mapped == MAPPED) return False;
@@ -1035,36 +1381,49 @@ PopUpMenu (MenuRoot *menu, int x, int y, Bool center)
     menu->entered = FALSE;
 
     if (center) {
-	x -= (menu->width / 2);
-	y -= (Scr->EntryHeight / 2);	/* sticky menus would be nice here */
+	x -= (menu->width / 2) + Scr->MenuBorderWidth;
+	y -= (Scr->EntryHeight / 2) + Scr->MenuBorderWidth; /* sticky menus would be nice here */
     }
 
     /*
      * clip to screen
      */
-    if (x + menu->width > Scr->MyDisplayWidth) {
-	x = Scr->MyDisplayWidth - menu->width;
+    i = 2*Scr->MenuBorderWidth;
+    if (Scr->Shadow && (SHADOWWIDTH > i))
+	i = SHADOWWIDTH;
+#ifdef TILED_SCREEN
+    if (Scr->use_panels == TRUE)
+    {
+	int k = FindNearestPanelToMouse();
+	EnsureRectangleOnPanel (k, &x, &y, menu->width + i, menu->height + i);
     }
-    if (x < 0) x = 0;
-    if (y + menu->height > Scr->MyDisplayHeight) {
-	y = Scr->MyDisplayHeight - menu->height;
-    }
-    if (y < 0) y = 0;
+    else
+#endif
+	EnsureRectangleOnScreen (&x, &y, menu->width + i, menu->height + i);
+
+    InstallRootColormap();
 
     MenuOrigins[MenuDepth].x = x;
     MenuOrigins[MenuDepth].y = y;
     MenuDepth++;
 
-    XMoveWindow(dpy, menu->w, x, y);
+    XMoveWindow(dpy, menu->w.win, x, y);
     if (Scr->Shadow) {
 	XMoveWindow (dpy, menu->shadow, x + SHADOWWIDTH, y + SHADOWWIDTH);
     }
     if (Scr->Shadow) {
 	XRaiseWindow (dpy, menu->shadow);
     }
-    XMapRaised(dpy, menu->w);
+    XMapRaised(dpy, menu->w.win);
+#ifdef TWM_USE_RENDER
+    if (menu->backingstore != None)
+	XCopyArea (dpy, menu->w.win, menu->backingstore, Scr->NormalGC, 0, 0, menu->width, menu->height, 0, 0);
+#endif
     if (Scr->Shadow) {
 	XMapWindow (dpy, menu->shadow);
+#ifdef TWM_USE_RENDER
+	RepaintTranslucentShadow (menu);
+#endif
     }
     XSync(dpy, 0);
     return True;
@@ -1089,12 +1448,13 @@ PopDownMenu()
 	PaintEntry(ActiveMenu, ActiveItem, False);
     }
 
+    MenuDepth = 0;
     for (tmp = ActiveMenu; tmp != NULL; tmp = tmp->prev)
     {
 	if (Scr->Shadow) {
 	    XUnmapWindow (dpy, tmp->shadow);
 	}
-	XUnmapWindow(dpy, tmp->w);
+	XUnmapWindow(dpy, tmp->w.win);
 	tmp->mapped = UNMAPPED;
 	UninstallRootColormap();
     }
@@ -1102,7 +1462,6 @@ PopDownMenu()
     XFlush(dpy);
     ActiveMenu = NULL;
     ActiveItem = NULL;
-    MenuDepth = 0;
     if (Context == C_WINDOW || Context == C_FRAME || Context == C_TITLE)
       menuFromFrameOrWindowOrTitlebar = TRUE;
 }
@@ -1136,8 +1495,8 @@ belongs_to_twm_window (TwmWindow *t, Window w)
 {
     if (!t) return False;
 
-    if (w == t->frame || w == t->title_w || w == t->hilite_w ||
-	w == t->icon_w || w == t->icon_bm_w) return True;
+    if (w == t->frame || w == t->title_w.win || w == t->hilite_w ||
+	w == t->icon_w.win || w == t->icon_bm_w) return True;
     
     if (t && t->titlebuttons) {
 	register TBWindow *tbw;
@@ -1147,6 +1506,22 @@ belongs_to_twm_window (TwmWindow *t, Window w)
 	}
     }
     return False;
+}
+
+
+
+static void
+SaveRingMouseLocation (TwmWindow *t)
+{
+    if (t != NULL)
+	if (True == XQueryPointer (dpy, t->frame, &JunkRoot, &JunkChild,
+			    &JunkX, &JunkY, &HotX, &HotY, &JunkMask))
+	    if (HotX >= -t->frame_bw && HotX < t->frame_width + t->frame_bw
+		&& HotY >= -t->frame_bw && HotY < t->frame_height + t->frame_bw)
+	    {
+		t->ring.curs_x = HotX;
+		t->ring.curs_y = HotY;
+	    }
 }
 
 
@@ -1181,9 +1556,9 @@ resizeFromCenter(Window w, TwmWindow *tmp_win)
 #if 0
   Scr->SizeStringOffset = width +
     MyFont_TextWidth(&Scr->SizeFont, ": ", 2);
-  XResizeWindow (dpy, Scr->SizeWindow, Scr->SizeStringOffset +
+  XResizeWindow (dpy, Scr->SizeWindow.win, Scr->SizeStringOffset +
 		 Scr->SizeStringWidth, height);
-  MyFont_DrawImageString (dpy, Scr->SizeWindow, &Scr->SizeFont, Scr->NormalGC,
+  MyFont_DrawImageString (&Scr->SizeWindow, &Scr->SizeFont, Scr->NormalGC,
 		    width, SIZE_VINDENT + Scr->SizeFont.ascent,
 		    ": ", 2);
 #endif
@@ -1264,7 +1639,6 @@ WarpThere(TwmWindow *t)
 {
     if (Scr->WarpUnmapped || t->mapped) {
         if (!t->mapped) DeIconify (t);
-        if (!Scr->NoRaiseWarp) XRaiseWindow (dpy, t->frame);
         WarpToWindow (t); 
         return 1; 
     }    
@@ -1301,6 +1675,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
     case F_BACKICONMGR:
     case F_NEXTICONMGR:
     case F_PREVICONMGR:
+    case F_SWAPICONMGRENTRY:
     case F_NOP:
     case F_TITLE:
     case F_DELTASTOP:
@@ -1312,12 +1687,31 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
     case F_WARPNEXT:
     case F_WARPPREV:
     case F_COLORMAP:
+#ifdef TWM_USE_SLOPPYFOCUS
+    case F_SLOPPYFOCUS:
+#endif
 	break;
     default:
-        XGrabPointer(dpy, Scr->Root, True,
-            ButtonPressMask | ButtonReleaseMask,
-            GrabModeAsync, GrabModeAsync,
-            Scr->Root, Scr->WaitCursor, CurrentTime);
+	switch (func)
+	{
+	/* restrict mouse to the screen of function execution: */
+	case F_FORCEMOVE:
+	case F_MOVE:
+	case F_RESIZE:
+	    JunkRoot = Scr->Root;
+	    break;
+	default:
+	    /*
+	     * evtl. don't warp mouse to another screen
+	     * (as otherwise imposed by 'confine_to' Scr->Root):
+	     */
+	    JunkRoot = None;
+	    break;
+	}
+	XGrabPointer (dpy, Scr->Root, True,
+			ButtonPressMask | ButtonReleaseMask,
+			GrabModeAsync, GrabModeAsync,
+			JunkRoot, Scr->WaitCursor, CurrentTime);
 	break;
     }
 
@@ -1349,33 +1743,73 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
     case F_RIGHTICONMGR:
     case F_FORWICONMGR:
     case F_BACKICONMGR:
-	MoveIconManager(func);
+	if (Scr->NoIconManagers == FALSE) {
+#ifdef TWM_USE_SLOPPYFOCUS
+	    if ((FocusRoot == TRUE) || (SloppyFocus == TRUE))
+#else
+	    if (FocusRoot == TRUE) /* nonfunctional: skip if f.focus active */
+#endif
+	    {
+		SaveRingMouseLocation (tmp_win);
+		MoveIconManager (func);
+	    }
+	}
         break;
 
     case F_NEXTICONMGR:
     case F_PREVICONMGR:
-	JumpIconManager(func);
+	if (Scr->NoIconManagers == FALSE) {
+#ifdef TWM_USE_SLOPPYFOCUS
+	    if ((FocusRoot == TRUE) || (SloppyFocus == TRUE))
+#else
+	    if (FocusRoot == TRUE) /* makes no sense too: skip if f.focus active */
+#endif
+	    {
+		SaveRingMouseLocation (tmp_win);
+		JumpIconManager (func);
+	    }
+	}
         break;
 
     case F_SHOWLIST:
-	if (Scr->NoIconManagers)
-	    break;
-	DeIconify(Scr->iconmgr.twm_win);
-	XRaiseWindow(dpy, Scr->iconmgr.twm_win->frame);
+	if (Scr->NoIconManagers == FALSE) {
+	    if (context == C_ROOT) {
+		IconMgr *p;
+		for (p = &Scr->iconmgr; p != NULL; p = p->next)
+		    ShowIconManager (p);
+	    }
+	    else if (tmp_win && tmp_win->list)
+		ShowIconManager (tmp_win->list->iconmgr);
+	    else if (Scr->ActiveIconMgr)
+		ShowIconManager (Scr->ActiveIconMgr);
+	    else
+		ShowIconManager (&Scr->iconmgr);
+	}
 	break;
 
     case F_HIDELIST:
-	if (Scr->NoIconManagers)
-	    break;
-	HideIconManager ();
+	if (Scr->NoIconManagers == FALSE) {
+	    if (context == C_ROOT) {
+		IconMgr *p;
+		for (p = &Scr->iconmgr; p != NULL; p = p->next)
+		    HideIconManager (p);
+	    }
+	    else if (tmp_win && tmp_win->list)
+		HideIconManager (tmp_win->list->iconmgr);
+	    else if (Scr->ActiveIconMgr)
+		HideIconManager (Scr->ActiveIconMgr);
+	    else
+		HideIconManager (&Scr->iconmgr);
+	}
 	break;
 
     case F_SORTICONMGR:
-	if (DeferExecution(context, func, Scr->SelectCursor))
-	    return TRUE;
-
+	if (Scr->NoIconManagers == FALSE)
 	{
 	    int save_sort;
+
+	    if (DeferExecution(context, func, Scr->SelectCursor))
+		return TRUE;
 
 	    save_sort = Scr->SortIconMgr;
 	    Scr->SortIconMgr = TRUE;
@@ -1388,6 +1822,29 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 		Bell(XkbBI_Info,0,tmp_win->w);
 
 	    Scr->SortIconMgr = save_sort;
+	}
+	break;
+
+    case F_SWAPICONMGRENTRY:
+	if (Scr->NoIconManagers == FALSE && Scr->SortIconMgr == FALSE) {
+	    if (tmp_win && tmp_win->list) {
+#ifdef TWM_USE_SLOPPYFOCUS
+		if ((FocusRoot == TRUE) || (SloppyFocus == TRUE))
+#else
+		if (FocusRoot == TRUE) /* skip if f.focus active */
+#endif
+		{
+#ifdef TWM_USE_SLOPPYFOCUS
+		    if (SloppyFocus == TRUE)
+			FocusOnRoot();
+#endif
+		    if (strcmp (action, WARPSCREEN_NEXT) == 0)
+			SwapIconManagerEntry (tmp_win->list, F_NEXTICONMGR);
+		    else if (strcmp (action, WARPSCREEN_PREV) == 0)
+			SwapIconManagerEntry (tmp_win->list, F_PREVICONMGR);
+		}
+	    } else
+		Bell(XkbBI_MinorError,0,None);
 	}
 	break;
 
@@ -1425,6 +1882,36 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	}
 	else
 	{
+#ifdef TILED_SCREEN
+	    if (Scr->use_panels == TRUE)
+	    {
+		int k = FindNearestPanelToClient (tmp_win);
+
+		JunkX = tmp_win->frame_width  + 2*tmp_win->frame_bw;
+		JunkY = tmp_win->frame_height + 2*tmp_win->frame_bw;
+		if (Distance1D(tmp_win->frame_x, tmp_win->frame_x+JunkX,
+			    Lft(Scr->panels[k]), Rht(Scr->panels[k])) < Scr->TitleHeight-1
+		    || Distance1D(tmp_win->frame_y, tmp_win->frame_y+JunkY,
+			    Bot(Scr->panels[k]), Top(Scr->panels[k])) < Scr->TitleHeight-1)
+		{
+		    EnsureRectangleOnPanel (k, &tmp_win->frame_x, &tmp_win->frame_y,
+						JunkX, JunkY);
+		    XMoveWindow (dpy, tmp_win->frame, tmp_win->frame_x, tmp_win->frame_y);
+		}
+	    }
+	    else
+#endif
+	    {
+		while (tmp_win->frame_x >= Scr->MyDisplayWidth)
+		    tmp_win->frame_x -= Scr->MyDisplayWidth;
+		while (tmp_win->frame_x < 0)
+		    tmp_win->frame_x += Scr->MyDisplayWidth;
+		while (tmp_win->frame_y >= Scr->MyDisplayHeight)
+		    tmp_win->frame_y -= Scr->MyDisplayHeight;
+		while (tmp_win->frame_y < 0)
+		    tmp_win->frame_y += Scr->MyDisplayHeight;
+		XMoveWindow (dpy, tmp_win->frame, tmp_win->frame_x, tmp_win->frame_y);
+	    }
 	    DeIconify(tmp_win);
 	    XRaiseWindow (dpy, tmp_win->frame);
 	}
@@ -1442,7 +1929,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	    XWarpPointer(dpy, None, Scr->Root, 
 		0, 0, 0, 0, eventp->xbutton.x_root, eventp->xbutton.y_root);
 
-	if (w != tmp_win->icon_w) {	/* can't resize icons */
+	if (w != tmp_win->icon_w.win) {	/* can't resize icons */
 
 	  if ((Context == C_FRAME || Context == C_WINDOW || Context == C_TITLE)
 	      && fromMenu) 
@@ -1493,13 +1980,38 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
     case F_ZOOM:
     case F_HORIZOOM:
     case F_FULLZOOM:
+    case F_MAXIMIZE:
     case F_LEFTZOOM:
     case F_RIGHTZOOM:
     case F_TOPZOOM:
     case F_BOTTOMZOOM:
+    case F_PANELZOOM:
+    case F_PANELHORIZOOM:
+    case F_PANELFULLZOOM:
+    case F_PANELMAXIMIZE:
+    case F_PANELLEFTZOOM:
+    case F_PANELRIGHTZOOM:
+    case F_PANELTOPZOOM:
+    case F_PANELBOTTOMZOOM:
+    case F_PANELGEOMETRYZOOM:
+    case F_PANELLEFTMOVE:
+    case F_PANELRIGHTMOVE:
+    case F_PANELTOPMOVE:
+    case F_PANELBOTTOMMOVE:
+    case F_PANELGEOMETRYMOVE:
 	if (DeferExecution(context, func, Scr->SelectCursor))
 	    return TRUE;
-	fullzoom(tmp_win, func);
+	if (func == F_PANELGEOMETRYZOOM || func == F_PANELGEOMETRYMOVE)
+	    fullgeomzoom (action, tmp_win, func);
+	else
+	    fullzoom (ParsePanelIndex(action), tmp_win, func);
+
+	XUngrabPointer (dpy, CurrentTime); /* ? */
+	XUngrabServer (dpy); /* <-- is the server grabbed here? */
+
+	if (tmp_win->iconmgr == TRUE)
+	    /* draw shapes anew as SetFrameShape() removes them called by SetupFrame() */
+	    SetIconManagerAllLabelShapeMasks (tmp_win->iconmgrp);
 	break;
 
     case F_MOVE:
@@ -1527,15 +2039,15 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	    GrabModeAsync, GrabModeAsync,
 	    Scr->Root, Scr->MoveCursor, CurrentTime);
 
-	if (context == C_ICON && tmp_win->icon_w)
+	if (context == C_ICON && tmp_win->icon_w.win)
 	{
-	    w = tmp_win->icon_w;
+	    w = tmp_win->icon_w.win;
 	    DragX = eventp->xbutton.x;
 	    DragY = eventp->xbutton.y;
 	    moving_icon = TRUE;
 	}
 
-	else if (w != tmp_win->icon_w)
+	else if (w != tmp_win->icon_w.win)
 	{
 	    XTranslateCoordinates(dpy, w, tmp_win->frame,
 		eventp->xbutton.x, 
@@ -1595,8 +2107,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 		 * the XCheckMaskEvent inner loop down to one of the
 		 * MoveOutline's below.
 		 */
-		MoveOutline(rootw,
-		    origDragX - JunkBW, origDragY - JunkBW,
+		MoveOutline(rootw, origDragX, origDragY,
 		    DragWidth + 2 * JunkBW, DragHeight + 2 * JunkBW,
 		    tmp_win->frame_bw,
 		    moving_icon ? 0 : tmp_win->title_height);
@@ -1740,7 +2251,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 
 		if (ConstMoveDir != MOVE_NONE)
 		{
-		    int xl, yt, xr, yb, w, h;
+		    int xl, yt, w, h;
 
 		    xl = ConstMoveX;
 		    yt = ConstMoveY;
@@ -1748,20 +2259,8 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 		    h = DragHeight + 2 * JunkBW;
 
 		    if (Scr->DontMoveOff && MoveFunction != F_FORCEMOVE)
-		    {
-			xr = xl + w;
-			yb = yt + h;
+			EnsureRectangleOnScreen (&xl, &yt, w, h);
 
-			if (xl < 0)
-			    xl = 0;
-			if (xr > Scr->MyDisplayWidth)
-			    xl = Scr->MyDisplayWidth - w;
-
-			if (yt < 0)
-			    yt = 0;
-			if (yb > Scr->MyDisplayHeight)
-			    yt = Scr->MyDisplayHeight - h;
-		    }
 		    CurrentDragX = xl;
 		    CurrentDragY = yt;
 		    if (Scr->OpaqueMove)
@@ -1774,7 +2273,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	    }
 	    else if (DragWindow != None)
 	    {
-		int xl, yt, xr, yb, w, h;
+		int xl, yt, w, h;
 		if (!menuFromFrameOrWindowOrTitlebar) {
 		  xl = eventp->xmotion.x_root - DragX - JunkBW;
 		  yt = eventp->xmotion.y_root - DragY - JunkBW;
@@ -1787,20 +2286,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 		h = DragHeight + 2 * JunkBW;
 
 		if (Scr->DontMoveOff && MoveFunction != F_FORCEMOVE)
-		{
-		    xr = xl + w;
-		    yb = yt + h;
-
-		    if (xl < 0)
-			xl = 0;
-		    if (xr > Scr->MyDisplayWidth)
-			xl = Scr->MyDisplayWidth - w;
-
-		    if (yt < 0)
-			yt = 0;
-		    if (yb > Scr->MyDisplayHeight)
-			yt = Scr->MyDisplayHeight - h;
-		}
+		    EnsureRectangleOnScreen (&xl, &yt, w, h);
 
 		CurrentDragX = xl;
 		CurrentDragY = yt;
@@ -1815,6 +2301,9 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	}
         MovedFromKeyPress = False;
 
+	if (tmp_win->iconmgr == TRUE)
+	    /* draw shapes anew as SetFrameShape() removes them called by SetupFrame() */
+	    SetIconManagerAllLabelShapeMasks (tmp_win->iconmgrp);
 
 	if (!Scr->OpaqueMove && DragWindow == None)
 	    UninstallRootColormap();
@@ -1855,6 +2344,22 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	if (tmp_win->icon)
 	{
 	    DeIconify(tmp_win);
+
+#ifdef TWM_USE_SLOPPYFOCUS
+	    if ((SloppyFocus == TRUE) || (FocusRoot == TRUE))
+#else
+	    if (FocusRoot == TRUE) /* only warp if f.focus is not active */
+#endif
+	    {
+		if (Scr->WarpCursorL != NULL) {
+		    if (LookInList(Scr->WarpCursorL, tmp_win->full_name, &tmp_win->class) != NULL)
+			WarpToWindow (tmp_win);
+		} else if (Scr->NoWarpCursorL != NULL) {
+		    if (LookInList(Scr->NoWarpCursorL, tmp_win->full_name, &tmp_win->class) == NULL)
+			WarpToWindow (tmp_win);
+		} else if (Scr->WarpCursor == TRUE)
+		    WarpToWindow (tmp_win);
+	    }
 	}
         else if (func == F_ICONIFY)
 	{
@@ -1871,7 +2376,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	    XWindowChanges xwc;
 
 	    xwc.stack_mode = Opposite;
-	    if (w != tmp_win->icon_w)
+	    if (w != tmp_win->icon_w.win)
 	      w = tmp_win->frame;
 	    XConfigureWindow (dpy, w, CWStackMode, &xwc);
 	}
@@ -1882,8 +2387,8 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	    return TRUE;
 
 	/* check to make sure raise is not from the WindowFunction */
-	if (w == tmp_win->icon_w && Context != C_ROOT) 
-	    XRaiseWindow(dpy, tmp_win->icon_w);
+	if (w == tmp_win->icon_w.win && Context != C_ROOT)
+	    XRaiseWindow(dpy, tmp_win->icon_w.win);
 	else
 	    XRaiseWindow(dpy, tmp_win->frame);
 
@@ -1893,8 +2398,8 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	if (DeferExecution(context, func, Scr->SelectCursor))
 	    return TRUE;
 
-	if (w == tmp_win->icon_w)
-	    XLowerWindow(dpy, tmp_win->icon_w);
+	if (w == tmp_win->icon_w.win)
+	    XLowerWindow(dpy, tmp_win->icon_w.win);
 	else
 	    XLowerWindow(dpy, tmp_win->frame);
 
@@ -1904,27 +2409,24 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	if (DeferExecution(context, func, Scr->SelectCursor))
 	    return TRUE;
 
-	if (tmp_win->icon == FALSE)
+	if (tmp_win->icon == FALSE && AcceptsInput(tmp_win))
 	{
-	    if (!Scr->FocusRoot && Scr->Focus == tmp_win)
+#ifdef TWM_USE_SLOPPYFOCUS
+	    if (SloppyFocus == FALSE && FocusRoot == FALSE && Focus == tmp_win)
+#else
+	    if (!FocusRoot && Focus == tmp_win)
+#endif
 	    {
 		FocusOnRoot();
 	    }
 	    else
 	    {
-		if (Scr->Focus != NULL) {
-		    SetBorder (Scr->Focus, False);
-		    if (Scr->Focus->hilite_w)
-		      XUnmapWindow (dpy, Scr->Focus->hilite_w);
-		}
-
-		InstallWindowColormaps (0, tmp_win);
-		if (tmp_win->hilite_w) XMapWindow (dpy, tmp_win->hilite_w);
-		SetBorder (tmp_win, True);
-		if (!tmp_win->wmhints || tmp_win->wmhints->input)
-		    SetFocus (tmp_win, eventp->xbutton.time);
-		Scr->FocusRoot = FALSE;
-		Scr->Focus = tmp_win;
+#ifdef TWM_USE_SLOPPYFOCUS
+		if (SloppyFocus == TRUE)
+		    SloppyFocus = FALSE;
+#endif
+		FocusOnClient(tmp_win);
+		HighLightIconManager (tmp_win);
 	    }
 	}
 	break;
@@ -1944,7 +2446,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	    return TRUE;
 
 	if (tmp_win->iconmgr)		/* don't send ourself a message */
-	  HideIconManager ();
+	  HideIconManager (tmp_win->iconmgrp);
 	else if (tmp_win->protocols & DoesWmDeleteWindow)
 	  SendDeleteWindowMessage (tmp_win, LastTimestamp());
 	else
@@ -1970,20 +2472,47 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	break;
 
     case F_EXEC:
-	PopDownMenu();
-	if (!Scr->NoGrabServer) {
-	    XUngrabServer (dpy);
-	    XSync (dpy, 0);
+	{
+	    ScreenInfo *scr;
+	    if (FocusRoot != TRUE)
+	    /*
+	     * f.focus / f.sloppyfocus:  Execute external program
+	     * on the screen where the mouse is and not where
+	     * the current X11-event occurred.  (The XGrabPointer()
+	     * above should not 'confine_to' the mouse onto that
+	     * screen as well.)
+	     */
+		scr = FindPointerScreenInfo();
+	    else
+		scr = Scr;
+
+	    PopDownMenu();
+	    if (!scr->NoGrabServer)
+		XUngrabServer (dpy);
+	    XSync (dpy, False);
+	    Execute (scr, action);
 	}
-	Execute(action);
 	break;
 
     case F_UNFOCUS:
+	UnHighLightIconManager();
+#ifdef TWM_USE_SLOPPYFOCUS
+	SloppyFocus = FALSE;
+#endif
 	FocusOnRoot();
 	break;
 
+#ifdef TWM_USE_SLOPPYFOCUS
+    case F_SLOPPYFOCUS:
+	UnHighLightIconManager();
+	FocusOnRoot();      /* Important: first withdraw focus from some */
+	SloppyFocus = TRUE; /* client before entering SloppyFocus mode.  */
+	break;
+#endif
+
     case F_CUT:
-	strcpy(tmp, action);
+	strncpy (tmp, action, sizeof(tmp)-2);
+	tmp[sizeof(tmp)-2] = '\0';
 	strcat(tmp, "\n");
 	XStoreBytes(dpy, tmp, strlen(tmp));
 	break;
@@ -1991,7 +2520,13 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
     case F_CUTFILE:
 	ptr = XFetchBytes(dpy, &count);
 	if (ptr) {
-	    if (sscanf (ptr, "%s", tmp) == 1) {
+	    if (ptr[0] != '\0' && ptr[0] != '\n' && ptr[0] != '\r') {
+		strncpy (tmp, ptr, sizeof(tmp)-1);
+		tmp[sizeof(tmp)-1] = '\0';
+		count = strlen (tmp);
+		while (--count >= 0)
+		    if (tmp[count] == '\n' || tmp[count] == '\r')
+			tmp[count] = '\0';
 		XFree (ptr);
 		ptr = ExpandFilename(tmp);
 		if (ptr) {
@@ -2017,14 +2552,33 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 
     case F_WARPTOSCREEN:
 	{
+	    ScreenInfo *scr;
+	    if (FocusRoot != TRUE) {
+		/*
+		 * f.focus / f.sloppyfocus is active:  KeyPress X11-events
+		 * are delivered into the focused window probably on
+		 * another screen, then "Scr" is not where the mouse is:
+		 */
+		scr = FindPointerScreenInfo();
+#ifdef TWM_USE_SLOPPYFOCUS
+		if (SloppyFocus == TRUE) {
+		    UnHighLightIconManager();
+		    FocusOnRoot(); /* drop client focus before screen switch */
+		}
+#endif
+	    } else
+		scr = Scr;
+
+            SaveRingMouseLocation (tmp_win);
+
 	    if (strcmp (action, WARPSCREEN_NEXT) == 0) {
-		WarpToScreen (Scr->screen + 1, 1);
+		WarpToScreen (scr, scr->screen + 1, 1);
 	    } else if (strcmp (action, WARPSCREEN_PREV) == 0) {
-		WarpToScreen (Scr->screen - 1, -1);
+		WarpToScreen (scr, scr->screen - 1, -1);
 	    } else if (strcmp (action, WARPSCREEN_BACK) == 0) {
-		WarpToScreen (PreviousScreen, 0);
+		WarpToScreen (scr, PreviousScreen, 0);
 	    } else {
-		WarpToScreen (atoi (action), 0);
+		WarpToScreen (scr, atoi (action), 0);
 	    }
 	}
 	break;
@@ -2043,17 +2597,24 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 
     case F_WARPPREV:
     case F_WARPNEXT:
-	{
+#ifdef TWM_USE_SLOPPYFOCUS
+	    if ((FocusRoot == TRUE) || (SloppyFocus == TRUE))
+#else
+	    if (FocusRoot == TRUE) /* nonfunctional: skip if f.focus active */
+#endif
+	    {
 		register TwmWindow *t;
 		static TwmWindow *savedwarp = NULL;
 		TwmWindow *of, *l, *n;
 		int c=0;
 
+		SaveRingMouseLocation (tmp_win);
+
 #define wseq(w) (func == F_WARPNEXT ? (w)->next : (w)->prev)
 #define nwin(w) ((w) && (n=wseq(w)) != NULL && n != &Scr->TwmRoot ? n : l)
 #define bwin(w) (!(w)||(w)->iconmgr||(w)==of||!(Scr->WarpUnmapped||(w)->mapped))
 
-		of=(Scr->Focus ? Scr->Focus : &Scr->TwmRoot);
+		of=(tmp_win ? tmp_win : &Scr->TwmRoot);
 
 		for(t=Scr->TwmRoot.next; t; t=t->next) if(!bwin(t)) break;
 		if(!t) break;	/* no windows we can use */
@@ -2073,7 +2634,7 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 			WarpThere(t);
 		}
 		break;
-	}
+	    }
 
     case F_WARPTO:
 	{
@@ -2081,6 +2642,20 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	    int len;
 
 	    len = strlen(action);
+
+	    if (len == 0) {
+		if (tmp_win != NULL)
+		    WarpThere(tmp_win);
+		else if (Scr->NoIconManagers == FALSE
+			&& Scr->ActiveIconMgr != NULL
+			&& Scr->ActiveIconMgr->active != NULL)
+		    WarpThere(Scr->ActiveIconMgr->active->twm);
+		else if (Focus != NULL)
+		    WarpThere(Focus);
+		else
+		    Bell(XkbBI_MinorError,0,None);
+		break;
+	    }
 
 	    for (t = Scr->TwmRoot.next; t != NULL; t = t->next) {
 		if (!strncmp(action, t->name, len)) 
@@ -2108,35 +2683,31 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	{
 	    TwmWindow *t;
 	    int len;
-	    Window raisewin = None, iconwin = None;
+
+	    SaveRingMouseLocation (tmp_win);
 
 	    len = strlen(action);
 	    if (len == 0) {
 		if (tmp_win && tmp_win->list) {
-		    raisewin = tmp_win->list->iconmgr->twm_win->frame;
-		    iconwin = tmp_win->list->icon;
+		    WarpToIconManager (tmp_win->list);
+		} else if (Scr->ActiveIconMgr) {
+		    if (Scr->ActiveIconMgr->active)
+			WarpToIconManager (Scr->ActiveIconMgr->active);
+		    else if (Scr->ActiveIconMgr->first)
+			WarpToIconManager (Scr->ActiveIconMgr->first);
 		} else if (Scr->iconmgr.active) {
-		    raisewin = Scr->iconmgr.twm_win->frame;
-		    iconwin = Scr->iconmgr.active->w;
+		    WarpToIconManager (Scr->iconmgr.active);
+		} else if (Scr->iconmgr.first) {
+		    WarpToIconManager (Scr->iconmgr.first);
 		}
-	    } else {
-		for (t = Scr->TwmRoot.next; t != NULL; t = t->next) {
+	    } else
+		for (t = Scr->TwmRoot.next; t != NULL; t = t->next)
 		    if (strncmp (action, t->icon_name, len) == 0) {
-			if (t->list && t->list->iconmgr->twm_win->mapped) {
-			    raisewin = t->list->iconmgr->twm_win->frame;
-			    iconwin = t->list->icon;
+			if (t->list) {
+			    WarpToIconManager (t->list);
 			    break;
 			}
 		    }
-		}
-	    }
-
-	    if (raisewin) {
-		XRaiseWindow (dpy, raisewin);
-		XWarpPointer (dpy, None, iconwin, 0,0,0,0, 5, 5);
-	    } else {
-		Bell(XkbBI_MinorError,0,None);
-	    }
 	}
 	break;
 	
@@ -2199,8 +2770,8 @@ ExecuteFunction(int func, char *action, Window w, TwmWindow *tmp_win,
 	if (DeferExecution(context, func, Scr->SelectCursor))
 	    return TRUE;
 
-	if (context == C_ICON && tmp_win->icon_w)
-	    w = XCreateSimpleWindow(dpy, tmp_win->icon_w,
+	if (context == C_ICON && tmp_win->icon_w.win)
+	    w = XCreateSimpleWindow(dpy, tmp_win->icon_w.win,
 		0, 0, 9999, 9999, 0, Scr->Black, Scr->Black);
 	else
 	    w = XCreateSimpleWindow(dpy, tmp_win->frame,
@@ -2308,11 +2879,26 @@ NeedToDefer(MenuRoot *root)
 	case F_WINREFRESH:
 	case F_ZOOM:
 	case F_FULLZOOM:
+	case F_MAXIMIZE:
 	case F_HORIZOOM:
         case F_RIGHTZOOM:
         case F_LEFTZOOM:
         case F_TOPZOOM:
         case F_BOTTOMZOOM:
+	case F_PANELZOOM:
+	case F_PANELHORIZOOM:
+	case F_PANELFULLZOOM:
+	case F_PANELMAXIMIZE:
+	case F_PANELLEFTZOOM:
+	case F_PANELRIGHTZOOM:
+	case F_PANELTOPZOOM:
+	case F_PANELBOTTOMZOOM:
+	case F_PANELGEOMETRYZOOM:
+	case F_PANELLEFTMOVE:
+	case F_PANELRIGHTMOVE:
+	case F_PANELTOPMOVE:
+	case F_PANELBOTTOMMOVE:
+	case F_PANELGEOMETRYMOVE:
 	case F_AUTORAISE:
 	    return TRUE;
 	}
@@ -2345,7 +2931,7 @@ System (char *s)
 #endif
 
 void
-Execute(char *s)
+Execute (ScreenInfo *scr, char *s)
 {
 	/* FIXME: is all this stuff needed?  There could be security problems here. */
     static char buf[256];
@@ -2373,7 +2959,7 @@ Execute(char *s)
 	colon = buf + 8 + (colon - ds);	/* use version in buf */
 	dot1 = strchr (colon, '.');	/* first period after colon */
 	if (!dot1) dot1 = colon + strlen (colon);  /* if not there, append */
-	(void) sprintf (dot1, ".%d", Scr->screen);
+	(void) sprintf (dot1, ".%d", scr->screen);
 	putenv (buf);
 	restorevar = 1;
     }
@@ -2392,17 +2978,51 @@ Execute(char *s)
  * put input focus on the root window.
  */
 void
+FocusedOnRoot()
+{
+    InstallWindowColormaps (0, &Scr->TwmRoot);
+    Focus = NULL;
+    FocusRoot = TRUE;
+}
+
+void
 FocusOnRoot()
 {
     SetFocus ((TwmWindow *) NULL, LastTimestamp());
-    if (Scr->Focus != NULL)
+    FocusedOnRoot();
+}
+
+void
+FocusedOnClient (TwmWindow *tmp_win)
+{
+    InstallWindowColormaps (0, tmp_win);
+    Focus = tmp_win;
+    FocusRoot = FALSE;
+}
+
+void
+FocusOnClient (TwmWindow *tmp_win)
+{
+    /* check if client is going to accept focus: */
+    if (AcceptsInput(tmp_win) || ExpectsTakeFocus(tmp_win))
     {
-	SetBorder (Scr->Focus, False);
-	if (Scr->Focus->hilite_w) XUnmapWindow (dpy, Scr->Focus->hilite_w);
+	/*
+	 * set focus if
+	 * 'Passive' / 'Locally Active'
+	 * ICCCM focus model:
+	 */
+	if (AcceptsInput(tmp_win))
+	    SetFocus (tmp_win, LastTimestamp());
+	/*
+	 * send WM_TAKE_FOCUS if
+	 * 'Locally Active' / 'Globally Active'
+	 * ICCCM focus model:
+	 */
+	if (ExpectsTakeFocus(tmp_win))
+	    SendTakeFocusMessage (tmp_win, LastTimestamp());
+
+	FocusedOnClient (tmp_win);
     }
-    InstallWindowColormaps(0, &Scr->TwmRoot);
-    Scr->Focus = NULL;
-    Scr->FocusRoot = TRUE;
 }
 
 void
@@ -2410,24 +3030,32 @@ DeIconify(TwmWindow *tmp_win)
 {
     TwmWindow *t;
 
-    /* de-iconify the main window */
     if (tmp_win->icon)
     {
 	if (tmp_win->icon_on)
-	    Zoom(tmp_win->icon_w, tmp_win->frame);
+	    Zoom(tmp_win->icon_w.win, tmp_win->frame);
 	else if (tmp_win->group != (Window) 0)
 	{
 	    for (t = Scr->TwmRoot.next; t != NULL; t = t->next)
 	    {
 		if (tmp_win->group == t->w && t->icon_on)
 		{
-		    Zoom(t->icon_w, tmp_win->frame);
+		    Zoom(t->icon_w.win, tmp_win->frame);
 		    break;
 		}
 	    }
 	}
     }
 
+    /* take down the icon, iconmgr knob */
+    if (tmp_win->icon_w.win) {
+	XUnmapWindow(dpy, tmp_win->icon_w.win);
+	IconDown (tmp_win);
+    }
+    if (tmp_win->list)
+	XUnmapWindow(dpy, tmp_win->list->icon);
+
+    /* de-iconify the main window */
     XMapWindow(dpy, tmp_win->w);
     tmp_win->mapped = TRUE;
     if (Scr->NoRaiseDeicon)
@@ -2436,30 +3064,26 @@ DeIconify(TwmWindow *tmp_win)
 	XMapRaised(dpy, tmp_win->frame);
     SetMapStateProp(tmp_win, NormalState);
 
-    if (tmp_win->icon_w) {
-	XUnmapWindow(dpy, tmp_win->icon_w);
-	IconDown (tmp_win);
-    }
-    if (tmp_win->list)
-	XUnmapWindow(dpy, tmp_win->list->icon);
-    if ((Scr->WarpCursor ||
-	 LookInList(Scr->WarpCursorL, tmp_win->full_name, &tmp_win->class)) &&
-	tmp_win->icon)
-      WarpToWindow (tmp_win);
     tmp_win->icon = FALSE;
     tmp_win->icon_on = FALSE;
 
-
     /* now de-iconify transients */
-	for (t = Scr->TwmRoot.next; t != NULL; t = t->next)
+    for (t = Scr->TwmRoot.next; t != NULL; t = t->next)
 	{
 	  if (t->transient && t->transientfor == tmp_win->w)
 	    {
 	      if (t->icon_on)
-		Zoom(t->icon_w, t->frame);
+		Zoom(t->icon_w.win, t->frame);
 	      else
-		Zoom(tmp_win->icon_w, t->frame);
-	      
+		Zoom(tmp_win->icon_w.win, t->frame);
+
+	      if (t->icon_w.win) {
+		XUnmapWindow(dpy, t->icon_w.win);
+		IconDown (t);
+	      }
+	      if (t->list)
+		  XUnmapWindow(dpy, t->list->icon);
+
 	      XMapWindow(dpy, t->w);
 	      t->mapped = TRUE;
 	      if (Scr->NoRaiseDeicon)
@@ -2467,18 +3091,13 @@ DeIconify(TwmWindow *tmp_win)
 	      else
 		XMapRaised(dpy, t->frame);
 	      SetMapStateProp(t, NormalState);
-	      
-	      if (t->icon_w) {
-		XUnmapWindow(dpy, t->icon_w);
-		IconDown (t);
-	      }
-	      if (t->list) XUnmapWindow(dpy, t->list->icon);
+
 	      t->icon = FALSE;
 	      t->icon_on = FALSE;
 	    }
 	}
     
-    XSync (dpy, 0);
+    XSync (dpy, False);
 }
 
 
@@ -2494,14 +3113,11 @@ Iconify(TwmWindow *tmp_win, int def_x, int def_y)
     iconify = ((!tmp_win->iconify_by_unmapping) || tmp_win->transient);
     if (iconify)
     {
-	if (tmp_win->icon_w == (Window) 0)
+	if (tmp_win->icon_w.win == (Window) 0)
 	    CreateIconWindow(tmp_win, def_x, def_y);
 	else
 	    IconUp(tmp_win);
-	XMapRaised(dpy, tmp_win->icon_w);
     }
-    if (tmp_win->list)
-	XMapWindow(dpy, tmp_win->list->icon);
 
     XGetWindowAttributes(dpy, tmp_win->w, &winattrs);
     eventMask = winattrs.your_event_mask;
@@ -2514,9 +3130,9 @@ Iconify(TwmWindow *tmp_win, int def_x, int def_y)
 	    if (iconify)
 	      {
 		if (t->icon_on)
-			Zoom(t->icon_w, tmp_win->icon_w);
+		    Zoom(t->icon_w.win, tmp_win->icon_w.win);
 		else
-		  Zoom(t->frame, tmp_win->icon_w);
+		    Zoom(t->frame, tmp_win->icon_w.win);
 	      }
 	    
 	    /*
@@ -2528,24 +3144,22 @@ Iconify(TwmWindow *tmp_win, int def_x, int def_y)
 	    XUnmapWindow(dpy, t->w);
 	    XSelectInput(dpy, t->w, eventMask);
 	    XUnmapWindow(dpy, t->frame);
-	    if (t->icon_w)
-	      XUnmapWindow(dpy, t->icon_w);
 	    SetMapStateProp(t, IconicState);
-	    SetBorder (t, False);
-	    if (t == Scr->Focus)
-	      {
-		SetFocus ((TwmWindow *) NULL, LastTimestamp());
-		Scr->Focus = NULL;
-		Scr->FocusRoot = TRUE;
-	      }
-	    if (t->list) XMapWindow(dpy, t->list->icon);
+	    if (t == Focus)
+		FocusOnRoot();
+
+	    if (t->icon_w.win)
+		XUnmapWindow(dpy, t->icon_w.win);
+	    if (t->list)
+		XMapWindow(dpy, t->list->icon);
+
 	    t->icon = TRUE;
 	    t->icon_on = FALSE;
 	  }
       } 
     
     if (iconify)
-	Zoom(tmp_win->frame, tmp_win->icon_w);
+	Zoom(tmp_win->frame, tmp_win->icon_w.win);
 
     /*
      * Prevent the receipt of an UnmapNotify, since that would
@@ -2557,50 +3171,338 @@ Iconify(TwmWindow *tmp_win, int def_x, int def_y)
     XSelectInput(dpy, tmp_win->w, eventMask);
     XUnmapWindow(dpy, tmp_win->frame);
     SetMapStateProp(tmp_win, IconicState);
+    if (tmp_win == Focus)
+	FocusOnRoot();
 
-    SetBorder (tmp_win, False);
-    if (tmp_win == Scr->Focus)
-    {
-	SetFocus ((TwmWindow *) NULL, LastTimestamp());
-	Scr->Focus = NULL;
-	Scr->FocusRoot = TRUE;
+    XSync (dpy, False); /*ensure the client window is gone*/
+
+    /* put up the icon, iconmgr knob */
+    if (tmp_win->list) {
+	XMapWindow(dpy, tmp_win->list->icon);
+	NotActiveIconManager(tmp_win->list);
     }
-    tmp_win->icon = TRUE;
-    if (iconify)
+    if (iconify) {
+	XMapRaised(dpy, tmp_win->icon_w.win);
 	tmp_win->icon_on = TRUE;
-    else
+    } else
 	tmp_win->icon_on = FALSE;
-    XSync (dpy, 0);
+    tmp_win->icon = TRUE;
 }
 
 
 
-static void 
+void
+RaiseInfoWindow (int px, int py)
+{
+    if (InfoLines > 0) {
+	int i, twidth, width, height;
+
+	XUnmapWindow (dpy, Scr->InfoWindow.win);
+
+	(void) sprintf(Info[InfoLines++], "Click to dismiss....");
+
+	/* figure out the width and height of the info window: */
+#ifdef TWM_USE_SPACING
+	height  = InfoLines * (120*Scr->DefaultFont.height/100); /*baselineskip 1.2*/
+	height += Scr->DefaultFont.height - Scr->DefaultFont.y;
+#else
+	height = InfoLines * (Scr->DefaultFont.height+2);
+#endif
+	width = 1;
+	for (i = 0; i < InfoLines; i++)
+	{
+	    twidth = MyFont_TextWidth(&Scr->DefaultFont, Info[i], strlen(Info[i]));
+	    if (twidth > width)
+		width = twidth;
+	}
+
+#ifdef TWM_USE_SPACING
+	width += Scr->DefaultFont.height;
+#else
+	width += 10;		/* some padding */
+#endif
+
+	/* put the Infowindow centered and slightly below the location given: */
+	px -= (width / 2);
+	py -= (height / 3);
+
+#ifdef TILED_SCREEN
+	if (Scr->use_panels == TRUE)
+	{
+	    i = FindNearestPanelToMouse();
+	    EnsureRectangleOnPanel (i, &px, &py,
+		    width + 2*Scr->BorderWidth, height + 2*Scr->BorderWidth);
+	}
+	else
+#endif
+	    EnsureRectangleOnScreen (&px, &py,
+		    width + 2*Scr->BorderWidth, height + 2*Scr->BorderWidth);
+
+	XMoveResizeWindow(dpy, Scr->InfoWindow.win, px, py, width, height);
+	XMapRaised(dpy, Scr->InfoWindow.win);
+    }
+}
+
+void
 Identify (TwmWindow *t)
 {
-    int i, n, twidth, width, height;
-    int x, y;
+    int i, n, x, y;
     unsigned int wwidth, wheight, bw, depth;
-    Window junk;
-    int px, py, dummy;
-    unsigned udummy;
 
     n = 0;
     (void) sprintf(Info[n++], "Twm version:  %s", Version);
     Info[n++][0] = '\0';
 
-    if (t) {
+    if (t)
+    {
+	TwmWindow *tmp;
+	char *f;
 	XGetGeometry (dpy, t->w, &JunkRoot, &JunkX, &JunkY,
 		      &wwidth, &wheight, &bw, &depth);
 	(void) XTranslateCoordinates (dpy, t->w, Scr->Root, 0, 0,
-				      &x, &y, &junk);
+				      &x, &y, &JunkChild);
 	(void) sprintf(Info[n++], "Name             = \"%s\"", t->full_name);
+	(void) sprintf(Info[n++], "Icon name        = \"%s\"", t->icon_name);
 	(void) sprintf(Info[n++], "Class.res_name   = \"%s\"", t->class.res_name);
 	(void) sprintf(Info[n++], "Class.res_class  = \"%s\"", t->class.res_class);
+
+	if (PrintErrorMessages)
+	{
+	    Info[n++][0] = '\0';
+	    if (t->wmhints != NULL && (t->wmhints->flags & WindowGroupHint)) {
+		for (tmp = Scr->TwmRoot.next; tmp != NULL; tmp = tmp->next)
+		    if (tmp->w == t->wmhints->window_group)
+			break;
+		if (tmp != NULL)
+		    (void) sprintf(Info[n++], "Group member of  = \"%s\"", tmp->full_name);
+		else
+		    (void) sprintf(Info[n++], "Group member of  = 0x0%lx", (long)(t->wmhints->window_group));
+	    }
+	    if (t->transient) {
+		for (tmp = Scr->TwmRoot.next; tmp != NULL; tmp = tmp->next)
+		    if (tmp->w == t->transientfor)
+			break;
+		if (tmp != NULL)
+		    (void) sprintf(Info[n++], "Transient for    = \"%s\"", tmp->full_name);
+		else
+		    (void) sprintf(Info[n++], "Transient for    = 0x0%lx", (long)(t->transientfor));
+	    }
+
+	    if (t->wmhints != NULL && (t->wmhints->flags & StateHint))
+	    {
+		switch (t->wmhints->initial_state) {
+		case NormalState:
+		    f = (char*)(0);
+		    break;
+#if WithdrawnState == DontCareState
+		case WithdrawnState:
+		    f = "Withdrawn/DontCareState";
+		    break;
+#else
+		case WithdrawnState:
+		    f = "Withdrawn";
+		    break;
+		case DontCareState:
+		    f = "DontCareState";
+		    break;
+#endif
+		case IconicState:
+		    f = "Iconic";
+		    break;
+		case ZoomState:
+		    f = "ZoomState";
+		    break;
+		case InactiveState:
+		    f = "InactiveState";
+		    break;
+		default:
+		    f = "Unknown";
+		    break;
+		}
+		if (f != (char*)(0))
+		    (void) sprintf(Info[n++], "Initial state    = %s", f);
+	    }
+
+	    if (GetWMState(t->w, &i, &JunkChild) == True)
+	    {
+		switch (i) {
+		case NormalState:
+		    f = (char*)(0);
+		    break;
+#if WithdrawnState == DontCareState
+		case WithdrawnState:
+		    f = "Withdrawn/DontCareState";
+		    break;
+#else
+		case WithdrawnState:
+		    f = "Withdrawn";
+		    break;
+		case DontCareState:
+		    f = "DontCareState";
+		    break;
+#endif
+		case IconicState:
+		    f = "Iconic";
+		    break;
+		case ZoomState:
+		    f = "ZoomState";
+		    break;
+		case InactiveState:
+		    f = "InactiveState";
+		    break;
+		default:
+		    f = "Unknown";
+		    break;
+		}
+		if (f != (char*)(0))
+		    (void) sprintf(Info[n++], "_XA_WM_STATE     = %s", f);
+	    }
+
+	    if (t->wmhints != NULL && (t->wmhints->flags & IconWindowHint))
+		(void) sprintf(Info[n++], "Icon window      = foreign");
+
+	    if (t->wmhints != NULL && (t->wmhints->flags & InputHint)) {
+		i  = (t->wmhints->input == True) ? 2 : 0;
+		i |= (t->protocols & DoesWmTakeFocus) ? 1 : 0;
+	    } else {
+		if (t->protocols & DoesWmTakeFocus)
+		    i = 5;
+		else
+		    i = 6;
+	    }
+	    switch (i) {
+	    case 0: f = "No Input"; break;
+	    case 2: f = "Passive"; break;
+	    case 3: f = "Locally Active"; break;
+	    case 1: f = "Globally Active"; break;
+	    case 6: f = "Unknown (Passive?)"; break;
+	    case 5: f = "Unknown (Globally Active?)"; break;
+	    }
+	    (void) sprintf(Info[n++], "ICCCM Focusing   = %s", f);
+	    if (t->hints.width || t->hints.height || t->hints.x || t->hints.y)
+		(void) sprintf(Info[n++], "XSizeHints       = %dx%d%+d%+d",
+			t->hints.width, t->hints.height, t->hints.x, t->hints.y);
+	    if (t->hints.flags & USPosition)
+		(void) sprintf(Info[n++], "USPosition       = true");
+	    if (t->hints.flags & USSize)
+		(void) sprintf(Info[n++], "USSize           = true");
+	    if (t->hints.flags & PPosition)
+		(void) sprintf(Info[n++], "PPosition        = true");
+	    if (t->hints.flags & PSize)
+		(void) sprintf(Info[n++], "PSize            = true");
+	    if (t->hints.flags & PBaseSize)
+		(void) sprintf(Info[n++], "PBaseSize        = %dx%d",
+			t->hints.base_width, t->hints.base_height);
+
+	    if (t->hints.flags & PWinGravity)
+	    {
+		switch (t->hints.win_gravity)
+		{
+		case ForgetGravity:
+		    f = "ForgetGravity"; break;
+		case NorthWestGravity:
+		    f = "NorthWestGravity"; break;
+		case NorthGravity:
+		    f = "NorthGravity"; break;
+		case NorthEastGravity:
+		    f = "NorthEastGravity"; break;
+		case WestGravity:
+		    f = "WestGravity"; break;
+		case CenterGravity:
+		    f = "CenterGravity"; break;
+		case EastGravity:
+		    f = "EastGravity"; break;
+		case SouthWestGravity:
+		    f = "SouthWestGravity"; break;
+		case SouthGravity:
+		    f = "SouthGravity"; break;
+		case SouthEastGravity:
+		    f = "SouthEastGravity"; break;
+		case StaticGravity:
+		    f = "StaticGravity"; break;
+		default:
+		    f = "Unknown"; break;
+		}
+		if (t->hints.win_gravity != NorthWestGravity)
+		    (void) sprintf(Info[n++], "PWinGravity      = %s", f);
+	    }
+
+	    switch (t->attr.win_gravity)
+	    {
+#if UnmapGravity == ForgetGravity
+		case UnmapGravity:
+		    f = "ForgetGravity/UnmapGravity"; break;
+#else
+		case UnmapGravity:
+		    f = "UnmapGravity"; break;
+		case ForgetGravity:
+		    f = "ForgetGravity"; break;
+#endif
+		case NorthWestGravity:
+		    f = "NorthWestGravity"; break;
+		case NorthGravity:
+		    f = "NorthGravity"; break;
+		case NorthEastGravity:
+		    f = "NorthEastGravity"; break;
+		case WestGravity:
+		    f = "WestGravity"; break;
+		case CenterGravity:
+		    f = "CenterGravity"; break;
+		case EastGravity:
+		    f = "EastGravity"; break;
+		case SouthWestGravity:
+		    f = "SouthWestGravity"; break;
+		case SouthGravity:
+		    f = "SouthGravity"; break;
+		case SouthEastGravity:
+		    f = "SouthEastGravity"; break;
+		case StaticGravity:
+		    f = "StaticGravity"; break;
+		default:
+		    f = "Unknown"; break;
+	    }
+	    if (t->attr.win_gravity != NorthWestGravity)
+		(void) sprintf(Info[n++], "WinGravity       = %s", f);
+
+	    switch (t->attr.bit_gravity)
+	    {
+		case ForgetGravity:
+		    f = "ForgetGravity"; break;
+		case NorthWestGravity:
+		    f = "NorthWestGravity"; break;
+		case NorthGravity:
+		    f = "NorthGravity"; break;
+		case NorthEastGravity:
+		    f = "NorthEastGravity"; break;
+		case WestGravity:
+		    f = "WestGravity"; break;
+		case CenterGravity:
+		    f = "CenterGravity"; break;
+		case EastGravity:
+		    f = "EastGravity"; break;
+		case SouthWestGravity:
+		    f = "SouthWestGravity"; break;
+		case SouthGravity:
+		    f = "SouthGravity"; break;
+		case SouthEastGravity:
+		    f = "SouthEastGravity"; break;
+		case StaticGravity:
+		    f = "StaticGravity"; break;
+		default:
+		    f = "Unknown"; break;
+	    }
+	    if (t->attr.bit_gravity != NorthWestGravity)
+		(void) sprintf(Info[n++], "BitGravity       = %s", f);
+
+	    (void) sprintf(Info[n++], "Frame  XID       = 0x0%lx", (long)(t->frame));
+	    (void) sprintf(Info[n++], "Client XID       = 0x0%lx", (long)(t->w));
+	    if (t->attr.colormap != DefaultColormap(dpy, Scr->screen))
+		(void) sprintf(Info[n++], "Client Colormap  = 0x0%lx", (long)(t->attr.colormap));
+	}
+
 	Info[n++][0] = '\0';
-	(void) sprintf(Info[n++], "Geometry/root    = %dx%d+%d+%d", wwidth, wheight,
-		x, y);
-	(void) sprintf(Info[n++], "Border width     = %d", bw);
+	(void) sprintf(Info[n++], "Geometry/root    = %dx%d%+d%+d", wwidth, wheight, x, y);
+	(void) sprintf(Info[n++], "Border width     = %d", t->old_bw);
 	(void) sprintf(Info[n++], "Depth            = %d", depth);
 	if (HasSync)
 	{
@@ -2609,39 +3511,66 @@ Identify (TwmWindow *t)
 	    (void) sprintf(Info[n++], "Priority         = %d", priority);
 	}
     }
+    else
+    {
+	if (PrintErrorMessages)
+	{
+	    char *w = NULL, *r = NULL, *t = NULL;
+	    JunkX = RevertToPointerRoot;
+	    JunkChild = None;
+	    XGetInputFocus (dpy, &JunkChild, &JunkX);
+	    switch (JunkChild) {
+	    case None:
+		w = "None";
+		break;
+	    case PointerRoot:
+		w = "PointerRoot";
+		break;
+	    default:
+		if (I18N_FetchName (JunkChild, &t))
+		    w = t;
+	    }
+	    switch (JunkX) {
+	    case RevertToNone:
+		r = "RevertToNone";
+		break;
+	    case RevertToPointerRoot:
+		r = "RevertToPointerRoot";
+		break;
+	    case RevertToParent:
+		r = "RevertToParent";
+		break;
+	    default:
+		r = "?";
+	    }
+	    if (w)
+		(void) sprintf(Info[n++], "Focus: window = '%s' revert to = '%s'", w, r);
+	    else
+		(void) sprintf(Info[n++], "Focus: window = 0x0%lx revert to = '%s'", (long)JunkChild, r);
+	    if (t != NULL)
+		free (t);
+#ifdef TILED_SCREEN
+	    if (Scr->use_panels == TRUE)
+	    {
+		i = FindNearestPanelToMouse();
+		if (i >= 0 && i < Scr->npanels)
+		    (void) sprintf(Info[n++], "Panel %d (connector '%s'): x = %d  y = %d  w = %d  h = %d", i+1,
+			    (Scr->panel_names && Scr->panel_names[i] ? Scr->panel_names[i] : "unknown"),
+			    Lft(Scr->panels[i]), Bot(Scr->panels[i]),
+			    AreaWidth(Scr->panels[i]), AreaHeight(Scr->panels[i]));
+	    }
+#endif
+	}
+    }
 
     Info[n++][0] = '\0';
-    (void) sprintf(Info[n++], "Click to dismiss....");
-
-    /* figure out the width and height of the info window */
-    height = n * (Scr->DefaultFont.height+2);
-    width = 1;
-    for (i = 0; i < n; i++)
-    {
-	twidth = MyFont_TextWidth(&Scr->DefaultFont, Info[i], 
-	    strlen(Info[i]));
-	if (twidth > width)
-	    width = twidth;
-    }
-    if (InfoLines) XUnmapWindow(dpy, Scr->InfoWindow);
-
-    width += 10;		/* some padding */
-    if (XQueryPointer (dpy, Scr->Root, &JunkRoot, &JunkChild, &px, &py,
-		       &dummy, &dummy, &udummy)) {
-	px -= (width / 2);
-	py -= (height / 3);
-	if (px + width + BW2 >= Scr->MyDisplayWidth) 
-	  px = Scr->MyDisplayWidth - width - BW2;
-	if (py + height + BW2 >= Scr->MyDisplayHeight) 
-	  py = Scr->MyDisplayHeight - height - BW2;
-	if (px < 0) px = 0;
-	if (py < 0) py = 0;
-    } else {
-	px = py = 0;
-    }
-    XMoveResizeWindow(dpy, Scr->InfoWindow, px, py, width, height);
-    XMapRaised(dpy, Scr->InfoWindow); 
     InfoLines = n;
+
+    if (XQueryPointer (dpy, Scr->Root, &JunkRoot, &JunkChild, &x, &y,
+			&i, &i, &bw) == False)
+	x = y = 0;
+
+    RaiseInfoWindow (x, y);
 }
 
 
@@ -2651,8 +3580,8 @@ SetMapStateProp(TwmWindow *tmp_win, int state)
     unsigned long data[2];		/* "suggested" by ICCCM version 1 */
   
     data[0] = (unsigned long) state;
-    data[1] = (unsigned long) (tmp_win->iconify_by_unmapping ? None : 
-			   tmp_win->icon_w);
+    data[1] = (unsigned long) (tmp_win->iconify_by_unmapping ? None :
+			   tmp_win->icon_w.win);
 
     XChangeProperty (dpy, tmp_win->w, _XA_WM_STATE, _XA_WM_STATE, 32, 
 		 PropModeReplace, (unsigned char *) data, 2);
@@ -2686,12 +3615,46 @@ GetWMState (Window w, int *statep, Window *iwp)
 
 
 void
-WarpToScreen (int n, int inc)
+WarpToScreen (ScreenInfo *scr, int n, int inc)
 {
-    Window dumwin;
-    int x, y, dumint;
-    unsigned int dummask;
     ScreenInfo *newscr = NULL;
+
+#ifdef TILED_SCREEN
+    if (scr->use_panels == TRUE && scr->npanels > 0)
+    {
+	int k = FindNearestPanelToMouse();
+
+	if (inc != 0)
+	    n = k + inc;
+	while (n < 0)
+	    n += scr->npanels;
+	n %= scr->npanels;
+
+	XQueryPointer (dpy, scr->Root, &JunkRoot, &JunkChild,
+		    &JunkX, &JunkY, &JunkWidth, &JunkHeight, &JunkMask);
+
+	if (JunkX < Lft(scr->panels[k]) || JunkX > Rht(scr->panels[k])
+	    || JunkY < Bot(scr->panels[k]) || JunkY > Top(scr->panels[k]))
+	{
+	    /* fetch mouse from dead area */
+	    JunkX = (Lft(scr->panels[k]) + Rht(scr->panels[k])) / 2;
+	    JunkY = (Bot(scr->panels[k]) + Top(scr->panels[k])) / 2;
+	}
+	else if (JunkX < Lft(scr->panels[n]) || JunkX > Rht(scr->panels[n])
+	    || JunkY < Bot(scr->panels[n]) || JunkY > Top(scr->panels[n]))
+	{
+	    /* warp, keep relative position resp. top-left pixel */
+	    JunkX = Lft(scr->panels[n]) + (JunkX - Lft(scr->panels[k]))
+			* AreaWidth(Scr->panels[n])  / AreaWidth(Scr->panels[k]);
+	    JunkY = Bot(scr->panels[n]) + (JunkY - Bot(scr->panels[k]))
+			* AreaHeight(Scr->panels[n]) / AreaHeight(Scr->panels[k]);
+	}
+
+	XWarpPointer (dpy, None, scr->Root, 0, 0, 0, 0, JunkX, JunkY);
+	PreviousScreen = k; /* save previous panel (on 'global' screen) */
+	return;
+    }
+#endif
 
     while (!newscr) {
 					/* wrap around */
@@ -2713,14 +3676,16 @@ WarpToScreen (int n, int inc)
 	}
     }
 
-    if (Scr->screen == n) return;	/* already on that screen */
+    if (scr->screen == n) return;	/* already on that screen */
 
-    PreviousScreen = Scr->screen;
-    XQueryPointer (dpy, Scr->Root, &dumwin, &dumwin, &x, &y,
-		   &dumint, &dumint, &dummask);
+    PreviousScreen = scr->screen;
+    XQueryPointer (dpy, scr->Root, &JunkRoot, &JunkChild, &JunkX, &JunkY,
+		   &JunkWidth, &JunkHeight, &JunkMask);
 
-    XWarpPointer (dpy, None, newscr->Root, 0, 0, 0, 0, x, y);
-    return;
+    /* keep relative position: */
+    JunkX = (JunkX * newscr->MyDisplayWidth)  / scr->MyDisplayWidth;
+    JunkY = (JunkY * newscr->MyDisplayHeight) / scr->MyDisplayHeight;
+    XWarpPointer (dpy, None, newscr->Root, 0, 0, 0, 0, JunkX, JunkY);
 }
 
 
@@ -2773,15 +3738,28 @@ BumpWindowColormap (TwmWindow *tmp, int inc)
 }
 
 
-void
-HideIconManager ()
+static void
+HideIconManager (IconMgr *ip)
 {
-    SetMapStateProp (Scr->iconmgr.twm_win, WithdrawnState);
-    XUnmapWindow(dpy, Scr->iconmgr.twm_win->frame);
-    if (Scr->iconmgr.twm_win->icon_w)
-      XUnmapWindow (dpy, Scr->iconmgr.twm_win->icon_w);
-    Scr->iconmgr.twm_win->mapped = FALSE;
-    Scr->iconmgr.twm_win->icon = TRUE;
+    SetMapStateProp (ip->twm_win, WithdrawnState);
+    XUnmapWindow(dpy, ip->twm_win->frame);
+    if (ip->twm_win->icon_w.win)
+      XUnmapWindow (dpy, ip->twm_win->icon_w.win);
+    ip->twm_win->mapped = FALSE;
+    ip->twm_win->icon = TRUE;
+}
+
+
+static void
+ShowIconManager (IconMgr *ip)
+{
+    if (ip->count > 0) {
+	if (ip->twm_win->mapped != TRUE) {
+	    DeIconify (ip->twm_win);
+	    SetIconManagerAllLabelShapeMasks (ip); /* while iconmgr not mapped we didn't fiddle with shapes */
+	}
+	XRaiseWindow (dpy, ip->twm_win->frame);
+    }
 }
 
 
@@ -2791,13 +3769,13 @@ SetBorder (TwmWindow *tmp, Bool onoroff)
 {
     if (tmp->highlight) {
 	if (onoroff) {
-	    XSetWindowBorder (dpy, tmp->frame, tmp->border);
-	    if (tmp->title_w) 
-	      XSetWindowBorder (dpy, tmp->title_w, tmp->border);
+	    XSetWindowBorder (dpy, tmp->frame, tmp->BorderColor);
+	    if (tmp->title_w.win)
+	      XSetWindowBorder (dpy, tmp->title_w.win, tmp->BorderColor);
 	} else {
 	    XSetWindowBorderPixmap (dpy, tmp->frame, tmp->gray);
-	    if (tmp->title_w) 
-	      XSetWindowBorderPixmap (dpy, tmp->title_w, tmp->gray);
+	    if (tmp->title_w.win)
+	      XSetWindowBorderPixmap (dpy, tmp->title_w.win, tmp->gray);
 	}
     }
 }
@@ -2808,15 +3786,29 @@ DestroyMenu (MenuRoot *menu)
 {
     MenuItem *item;
 
-    if (menu->w) {
-	XDeleteContext (dpy, menu->w, MenuContext);
-	XDeleteContext (dpy, menu->w, ScreenContext);
+    if (menu->w.win) {
+#ifdef TWM_USE_XFT
+	if (Scr->use_xft > 0)
+	    MyXftDrawDestroy (menu->w.xft);
+#endif
+	XDeleteContext (dpy, menu->w.win, MenuContext);
+	XDeleteContext (dpy, menu->w.win, ScreenContext);
 	if (Scr->Shadow) XDestroyWindow (dpy, menu->shadow);
-	XDestroyWindow(dpy, menu->w);
+	XDestroyWindow(dpy, menu->w.win);
+#ifdef TWM_USE_RENDER
+	if (menu->backingstore != None)
+	    XFreePixmap (dpy, menu->backingstore);
+#endif
     }
 
     for (item = menu->first; item; ) {
 	MenuItem *tmp = item;
+#ifdef TWM_USE_RENDER
+	if (item->PenMenuF != None)
+	    XRenderFreePicture (dpy, item->PenMenuF);
+	if (item->PenMenuHiF != None)
+	    XRenderFreePicture (dpy, item->PenMenuHiF);
+#endif
 	item = item->next;
 	free ((char *) tmp);
     }
@@ -2831,6 +3823,7 @@ DestroyMenu (MenuRoot *menu)
 void 
 WarpAlongRing (XButtonEvent *ev, Bool forward)
 {
+    static TwmWindow *savedwarp = NULL;
     TwmWindow *r, *head;
 
     if (Scr->RingLeader)
@@ -2840,35 +3833,44 @@ WarpAlongRing (XButtonEvent *ev, Bool forward)
 
     if (forward) {
 	for (r = head->ring.next; r != head; r = r->ring.next) {
-	    if (!r || r->mapped) break;
+	    if (!r || r->mapped || Scr->WarpUnmapped) break;
 	}
     } else {
 	for (r = head->ring.prev; r != head; r = r->ring.prev) {
-	    if (!r || r->mapped) break;
+	    if (!r || r->mapped || Scr->WarpUnmapped) break;
 	}
     }
 
-    if (r && r != head) {
+    if (r != NULL)
+    {
 	TwmWindow *p = Scr->RingLeader, *t;
 
-	Scr->RingLeader = r;
-	WarpToWindow (r);
-
-	if (p && p->mapped &&
+	if (p && (p->mapped || Scr->WarpUnmapped) &&
 	    XFindContext (dpy, ev->window, TwmContext, (caddr_t *)&t) == XCSUCCESS &&
-	    p == t) {
-	    p->ring.cursor_valid = True;
-	    p->ring.curs_x = ev->x_root - t->frame_x;
-	    p->ring.curs_y = ev->y_root - t->frame_y;
-	    if (p->ring.curs_x < -p->frame_bw || 
-		p->ring.curs_x >= p->frame_width + p->frame_bw ||
-		p->ring.curs_y < -p->frame_bw || 
-		p->ring.curs_y >= p->frame_height + p->frame_bw) {
-		/* somehow out of window */
-		p->ring.curs_x = p->frame_width / 2;
-		p->ring.curs_y = p->frame_height / 2;
+	    p == t)
+	{
+	    /* only save mouse location if warping from inside the client area: */
+	    HotX = ev->x_root - (p->frame_x + p->frame_bw);
+	    HotY = ev->y_root - (p->frame_y + p->frame_bw);
+	    if (HotX >= -p->frame_bw && HotX < p->frame_width + p->frame_bw
+		    && HotY >= -p->frame_bw && HotY < p->frame_height + p->frame_bw)
+	    {
+		p->ring.curs_x = HotX;
+		p->ring.curs_y = HotY;
 	    }
 	}
+
+	if (p && p == savedwarp) {
+	    Iconify (p, 0, 0);
+	    savedwarp = NULL;
+	}
+	if (!r->mapped)
+	    savedwarp = r;
+	else
+	    savedwarp = NULL;
+
+	Scr->RingLeader = r;
+	WarpThere (r);
     }
 }
 
@@ -2877,17 +3879,33 @@ WarpAlongRing (XButtonEvent *ev, Bool forward)
 void 
 WarpToWindow (TwmWindow *t)
 {
-    int x, y;
-
-    if (t->auto_raise || !Scr->NoRaiseWarp) AutoRaiseWindow (t);
-    if (t->ring.cursor_valid) {
-	x = t->ring.curs_x;
-	y = t->ring.curs_y;
-    } else {
-	x = t->frame_width / 2;
-	y = t->frame_height / 2;
+    if (t->auto_raise || !Scr->NoRaiseWarp)
+	AutoRaiseWindow (t);
+#if 1
+    /* check if already there: */
+    if (False == XQueryPointer (dpy, t->frame, &JunkRoot, &JunkChild,
+				&JunkX, &JunkY, &HotX, &HotY, &JunkMask)
+	    || HotX < -t->frame_bw || HotX >= t->frame_width  + t->frame_bw
+	    || HotY < (Scr->TitleFocus == TRUE ? -t->frame_bw : t->title_height) || HotY >= t->frame_height + t->frame_bw)
+#endif
+    {
+#ifdef TWM_USE_SLOPPYFOCUS
+	if (SloppyFocus == TRUE && !AcceptsInput(t))
+	    FocusOnRoot();
+#endif
+	XWarpPointer (dpy, None, t->frame, 0, 0, 0, 0, t->ring.curs_x, t->ring.curs_y);
     }
-    XWarpPointer (dpy, None, t->frame, 0, 0, 0, 0, x, y);
+}
+
+void
+WarpToIconManager (WList *t)
+{
+    if (t->iconmgr->twm_win->mapped != TRUE)
+	ShowIconManager (t->iconmgr);
+    else
+	XRaiseWindow (dpy, t->iconmgr->twm_win->frame);
+    XWarpPointer (dpy, None, t->icon, 0, 0, 0, 0,
+		    Scr->iconifybox_width/2, Scr->iconifybox_height/2);
 }
 
 
@@ -2916,6 +3934,7 @@ send_clientmessage (Window w, Atom a, Time timestamp)
     ev.data.l[0] = a;
     ev.data.l[1] = timestamp;
     XSendEvent (dpy, w, False, 0L, (XEvent *) &ev);
+    XSync (dpy, False); /* speedup/sync message delivery*/
 }
 
 void
@@ -2934,4 +3953,6 @@ void
 SendTakeFocusMessage (TwmWindow *tmp, Time timestamp)
 {
     send_clientmessage (tmp->w, _XA_WM_TAKE_FOCUS, timestamp);
+    if (tmp->hilite_w) /* ...no FocusIn event coming */
+	XMapWindow (dpy, tmp->hilite_w);
 }

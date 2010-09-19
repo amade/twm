@@ -64,6 +64,10 @@ in this Software without prior written authorization from The Open Group.
 #include <stdio.h>
 #include "twm.h"
 #include <X11/Xatom.h>
+#include <X11/Xos.h>
+#ifdef TWM_USE_XINERAMA
+#include <X11/extensions/Xinerama.h>
+#endif
 #include "iconmgr.h"
 #include "add_window.h"
 #include "menus.h"
@@ -86,11 +90,6 @@ XEvent ButtonEvent;		/* button press event */
 XEvent Event;			/* the current event */
 TwmWindow *Tmp_win;		/* the current twm window */
 
-/** Used in HandleEnterNotify to remove border highlight from a window 
- * that has not recieved a LeaveNotify event because of a pointer grab 
- */
-TwmWindow *UnHighLight_win = NULL;
-
 Window DragWindow;		/* variables used in moving windows */
 int origDragX;
 int origDragY;
@@ -105,7 +104,6 @@ static int enter_flag;
 static int ColortableThrashing;
 static TwmWindow *enter_win, *raise_win;
 
-static void free_window_names ( TwmWindow *tmp, Bool nukefull, Bool nukename, Bool nukeicon );
 static void remove_window_from_ring ( TwmWindow *tmp );
 static void do_menu ( MenuRoot *menu, Window w );
 static Bool HENQueueScanner ( Display *dpy, XEvent *ev, char *args );
@@ -116,22 +114,46 @@ static Bool UninstallRootColormapQScanner ( Display *dpy, XEvent *ev, char *args
 int ButtonPressed = -1;
 int Cancel = FALSE;
 
+/** Used in HandleEnterNotify to remove border highlight from a window 
+ * that has not recieved a LeaveNotify event because of a pointer grab 
+ */
+TwmWindow *UnHighLight_win = NULL;
 
-void AutoRaiseWindow (TwmWindow *tmp)
+void HighLightIconManager (TwmWindow *twm)
 {
-    XRaiseWindow (dpy, tmp->frame);
-    XSync (dpy, 0);
-    enter_win = NULL;
-    enter_flag = TRUE;
-    raise_win = tmp;
+    if (UnHighLight_win != twm) {
+	if (UnHighLight_win != NULL && UnHighLight_win->list != NULL)
+	    NotActiveIconManager (UnHighLight_win->list);
+	if (twm->list != NULL) {
+	    ActiveIconManager (twm->list);
+	    UnHighLight_win = twm;
+	} else
+	    UnHighLight_win = NULL;
+    }
 }
+
+void UnHighLightIconManager (void)
+{
+    if (UnHighLight_win != NULL) {
+	if (UnHighLight_win->list != NULL)
+	    NotActiveIconManager (UnHighLight_win->list);
+	UnHighLight_win = NULL;
+    }
+}
+
 
 void SetRaiseWindow (TwmWindow *tmp)
 {
     enter_flag = TRUE;
     enter_win = NULL;
     raise_win = tmp;
-    XSync (dpy, 0);
+}
+
+void AutoRaiseWindow (TwmWindow *tmp)
+{
+    XRaiseWindow (dpy, tmp->frame);
+    XSync (dpy, False);
+    SetRaiseWindow (tmp);
 }
 
 
@@ -164,14 +186,28 @@ InitEvents()
     EventHandler[ButtonPress] = HandleButtonPress;
     EventHandler[EnterNotify] = HandleEnterNotify;
     EventHandler[LeaveNotify] = HandleLeaveNotify;
+    EventHandler[FocusIn] = HandleFocusChange;
+    EventHandler[FocusOut] = HandleFocusChange;
     EventHandler[ConfigureRequest] = HandleConfigureRequest;
     EventHandler[ClientMessage] = HandleClientMessage;
     EventHandler[PropertyNotify] = HandlePropertyNotify;
+    EventHandler[KeyRelease] = HandleKeyRelease;
     EventHandler[KeyPress] = HandleKeyPress;
     EventHandler[ColormapNotify] = HandleColormapNotify;
     EventHandler[VisibilityNotify] = HandleVisibilityNotify;
     if (HasShape)
 	EventHandler[ShapeEventBase+ShapeNotify] = HandleShapeNotify;
+#ifdef TWM_USE_XRANDR
+    if (HasXrandr)
+	EventHandler[XrandrEventBase+RRScreenChangeNotify] = HandleXrandrScreenChangeNotify;
+#ifdef TWM_USE_XINERAMA
+    else /*fallthrough*/
+#endif
+#endif
+#ifdef TWM_USE_XINERAMA
+    if (HasXinerama)
+	EventHandler[ConfigureNotify] = HandleConfigureNotify;
+#endif
 }
 
 
@@ -423,6 +459,14 @@ HandleColormapNotify()
 		 (lost == -1 || won == -1) && n < number_cwins;
 		 n++)
 	    {
+#if 1
+		if (won == -1 && cwins[n]->w == cevent->window)
+		{
+		    won = n;  /* colormap-focused client changes its colormap */
+		    ColortableThrashing = FALSE; /* don't thrash this installation */
+		    continue;
+		}
+#endif
 		if (lost == -1 && cwins[n] == cwin)
 		{
 		    lost = n;	/* This is the window which lost its colormap */
@@ -539,6 +583,15 @@ HandleVisibilityNotify()
 
 
 
+/**
+ * key release event handler
+ */
+void
+HandleKeyRelease()
+{
+    XFlush (dpy); /* speedup keybinding processing completion */
+}
+
 
 int MovedFromKeyPress = False;
 
@@ -553,22 +606,22 @@ HandleKeyPress()
     int len;
     unsigned int modifier;
 
-    if (InfoLines) XUnmapWindow(dpy, Scr->InfoWindow);
+    if (InfoLines) XUnmapWindow(dpy, Scr->InfoWindow.win);
     Context = C_NO_CONTEXT;
 
     if (Event.xany.window == Scr->Root)
 	Context = C_ROOT;
     if (Tmp_win)
     {
-	if (Event.xany.window == Tmp_win->title_w)
+	if (Event.xany.window == Tmp_win->title_w.win)
 	    Context = C_TITLE;
 	if (Event.xany.window == Tmp_win->w)
 	    Context = C_WINDOW;
-	if (Event.xany.window == Tmp_win->icon_w)
+	if (Event.xany.window == Tmp_win->icon_w.win)
 	    Context = C_ICON;
 	if (Event.xany.window == Tmp_win->frame)
 	    Context = C_FRAME;
-	if (Tmp_win->list && Event.xany.window == Tmp_win->list->w)
+	if (Tmp_win->list && Event.xany.window == Tmp_win->list->w.win)
 	    Context = C_ICONMGR;
 	if (Tmp_win->list && Event.xany.window == Tmp_win->list->icon)
 	    Context = C_ICONMGR;
@@ -651,24 +704,27 @@ HandleKeyPress()
 
     /* if we get here, no function key was bound to the key.  Send it
      * to the client if it was in a window we know about.
+     *
+     * Besides modifier keys e.g. Shift_L, Control_L, Alt_L and the like
+     * these may be "usual" keys as well typed while mouse hovering over
+     * icons or icon manager iconified entries (only if FocusRoot == TRUE).
      */
-    if (Tmp_win)
+    if (Tmp_win && Scr->TitleFocus)
     {
-        if (Event.xany.window == Tmp_win->icon_w ||
+        if (Event.xany.window == Tmp_win->icon_w.win ||
 	    Event.xany.window == Tmp_win->frame ||
-	    Event.xany.window == Tmp_win->title_w ||
-	    (Tmp_win->list && (Event.xany.window == Tmp_win->list->w)))
+	    Event.xany.window == Tmp_win->title_w.win ||
+	    (Tmp_win->list && (Event.xany.window == Tmp_win->list->w.win)))
         {
             Event.xkey.window = Tmp_win->w;
             XSendEvent(dpy, Tmp_win->w, False, KeyPressMask, &Event);
         }
     }
-
 }
 
 
 
-static void 
+void
 free_window_names (TwmWindow *tmp, Bool nukefull, Bool nukename, Bool nukeicon)
 {
 /*
@@ -715,6 +771,34 @@ free_cwins (TwmWindow *tmp)
 
 
 
+static void
+RaiseXUrgencyHintWindow (TwmWindow *tmp)
+{
+    int x, y;
+
+    InfoLines = 0;
+    (void) sprintf(Info[InfoLines++], "XUrgencyHint:");
+    (void) sprintf(Info[InfoLines++], "%s", tmp->name);
+
+    if (tmp->mapped) {
+	x = tmp->frame_x + tmp->frame_width/2;
+	y = tmp->frame_y;
+    } else
+	x = y = 0;
+
+    RaiseInfoWindow (x, y);
+}
+
+static void
+CheckXUrgencyHint (TwmWindow *tmp)
+{
+    if (tmp->wmhints && (tmp->wmhints->flags & XUrgencyHint))
+	if (Scr->ShowXUrgencyHints == TRUE)
+	    RaiseXUrgencyHintWindow (tmp);
+}
+
+
+
 /**
  * property notify event handler
  */
@@ -722,9 +806,6 @@ void
 HandlePropertyNotify()
 {
     char *name = NULL;
-    unsigned long valuemask;		/* mask for create windows */
-    XSetWindowAttributes attributes;	/* attributes for create windows */
-    Pixmap pm;
 
     /* watch for standard colormap changes */
     if (Event.xproperty.window == Scr->Root) {
@@ -753,7 +834,7 @@ HandlePropertyNotify()
 
     switch (Event.xproperty.atom) {
       case XA_WM_NAME:
-	if (!I18N_FetchName(dpy, Tmp_win->w, &name)) return;
+	if (!I18N_FetchName(Tmp_win->w, &name)) return;
 	free_window_names (Tmp_win, True, True, False);
 
 	Tmp_win->full_name = strdup(name ? name : NoName);
@@ -769,7 +850,7 @@ HandlePropertyNotify()
 	SetupWindow (Tmp_win, Tmp_win->frame_x, Tmp_win->frame_y,
 		     Tmp_win->frame_width, Tmp_win->frame_height, -1);
 
-	if (Tmp_win->title_w) XClearArea(dpy, Tmp_win->title_w, 0,0,0,0, True);
+	if (Tmp_win->title_w.win) XClearArea(dpy, Tmp_win->title_w.win, 0,0,0,0, True);
 
 	/*
 	 * if the icon name is NoName, set the name of the icon to be
@@ -782,7 +863,7 @@ HandlePropertyNotify()
 	break;
 
       case XA_WM_ICON_NAME:
-	if (!I18N_GetIconName(dpy, Tmp_win->w, &name)) return;
+	if (!I18N_GetIconName(Tmp_win->w, &name)) return;
 	free_window_names (Tmp_win, False, False, True);
 	Tmp_win->icon_name = strdup(name ? name : NoName);
 	if (name) free(name);
@@ -794,27 +875,35 @@ HandlePropertyNotify()
 	if (Tmp_win->wmhints) XFree ((char *) Tmp_win->wmhints);
 	Tmp_win->wmhints = XGetWMHints(dpy, Event.xany.window);
 
+#if 1
+	/* Turn off 'initial_state' flag as we are mapped, this confuses iconify/deiconify handling */
+	if (Tmp_win->wmhints)
+	    Tmp_win->wmhints->flags &= ~StateHint;
+#endif
+
 	if (Tmp_win->wmhints && (Tmp_win->wmhints->flags & WindowGroupHint))
 	  Tmp_win->group = Tmp_win->wmhints->window_group;
+
+	CheckXUrgencyHint (Tmp_win);
 
 	if (Tmp_win->icon_not_ours && Tmp_win->wmhints &&
 	    !(Tmp_win->wmhints->flags & IconWindowHint)) {
 	    /* IconWindowHint was formerly on, now off; revert
 	    // to a default icon */
 	    int icon_x = 0, icon_y = 0;
-	    XGetGeometry (dpy, Tmp_win->icon_w, &JunkRoot,
+	    XGetGeometry (dpy, Tmp_win->icon_w.win, &JunkRoot,
 			  &icon_x, &icon_y,
 			  &JunkWidth, &JunkHeight, &JunkBW, &JunkDepth);
-	    XSelectInput (dpy, Tmp_win->icon_w, None);
-	    XDeleteContext (dpy, Tmp_win->icon_w, TwmContext);
-	    XDeleteContext (dpy, Tmp_win->icon_w, ScreenContext);
+	    XSelectInput (dpy, Tmp_win->icon_w.win, None);
+	    XDeleteContext (dpy, Tmp_win->icon_w.win, TwmContext);
+	    XDeleteContext (dpy, Tmp_win->icon_w.win, ScreenContext);
 	    CreateIconWindow(Tmp_win, icon_x, icon_y);
 	    break;
 	}
 
 	if (!Tmp_win->forced && Tmp_win->wmhints &&
 	    Tmp_win->wmhints->flags & IconWindowHint) {
-	    if (Tmp_win->icon_w) {
+	    if (Tmp_win->icon_w.win) {
 	    	int icon_x, icon_y;
 
 		/*
@@ -822,7 +911,7 @@ HandlePropertyNotify()
 		 * Try to find out where it is; if we succeed, move the new
 		 * window to where the old one is.
 		 */
-		if (XGetGeometry (dpy, Tmp_win->icon_w, &JunkRoot, &icon_x,
+		if (XGetGeometry (dpy, Tmp_win->icon_w.win, &JunkRoot, &icon_x,
 		  &icon_y, &JunkWidth, &JunkHeight, &JunkBW, &JunkDepth)) {
 		    /*
 		     * Move the new icon window to where the old one was.
@@ -842,13 +931,28 @@ HandlePropertyNotify()
 		 * just get rid of it completely.
 		 */
 		if (Tmp_win->icon_not_ours) {
-		    if (Tmp_win->icon_w != Tmp_win->wmhints->icon_window)
-			XUnmapWindow(dpy, Tmp_win->icon_w);
-		} else
-		    XDestroyWindow(dpy, Tmp_win->icon_w);
+		    if (Tmp_win->icon_w.win != Tmp_win->wmhints->icon_window)
+			XUnmapWindow(dpy, Tmp_win->icon_w.win);
+		} else {
+#ifdef TWM_USE_XFT
+		    if (Scr->use_xft > 0)
+			MyXftDrawDestroy(Tmp_win->icon_w.xft);
+#endif
+#ifdef TWM_USE_RENDER
+		    if (Tmp_win->PicIconB != None) {
+			XRenderFreePicture (dpy, Tmp_win->PicIconB);
+			Tmp_win->PicIconB = None;
+		    }
+		    if (Tmp_win->PenIconB != None) {
+			XRenderFreePicture (dpy, Tmp_win->PenIconB);
+			Tmp_win->PenIconB = None;
+		    }
+#endif
+		    XDestroyWindow(dpy, Tmp_win->icon_w.win);
+		}
 
-		XDeleteContext(dpy, Tmp_win->icon_w, TwmContext);
-		XDeleteContext(dpy, Tmp_win->icon_w, ScreenContext);
+		XDeleteContext(dpy, Tmp_win->icon_w.win, TwmContext);
+		XDeleteContext(dpy, Tmp_win->icon_w.win, ScreenContext);
 
 		/*
 		 * The new icon window isn't our window, so note that fact
@@ -862,47 +966,30 @@ HandlePropertyNotify()
 		 * and button presses/releases, set up the contexts for it,
 		 * and define the cursor for it).
 		 */
-		Tmp_win->icon_w = Tmp_win->wmhints->icon_window;
-		XSelectInput (dpy, Tmp_win->icon_w,
+		Tmp_win->icon_w.win = Tmp_win->wmhints->icon_window;
+		XSelectInput (dpy, Tmp_win->icon_w.win,
 		  KeyPressMask | ButtonPressMask | ButtonReleaseMask);
-		XSaveContext(dpy, Tmp_win->icon_w, TwmContext, (caddr_t)Tmp_win);
-		XSaveContext(dpy, Tmp_win->icon_w, ScreenContext, (caddr_t)Scr);
-		XDefineCursor(dpy, Tmp_win->icon_w, Scr->IconCursor);
+		XSaveContext(dpy, Tmp_win->icon_w.win, TwmContext, (caddr_t)Tmp_win);
+		XSaveContext(dpy, Tmp_win->icon_w.win, ScreenContext, (caddr_t)Scr);
+		XDefineCursor(dpy, Tmp_win->icon_w.win, Scr->IconCursor);
+		SetIconWindowHintForFrame (Tmp_win, Tmp_win->icon_w.win);
 	    }
 	}
 
-	if (Tmp_win->icon_w && !Tmp_win->forced && Tmp_win->wmhints &&
-	    (Tmp_win->wmhints->flags & IconPixmapHint)) {
-	    if (!XGetGeometry (dpy, Tmp_win->wmhints->icon_pixmap, &JunkRoot,
-			       &JunkX, &JunkY, (unsigned int *)&Tmp_win->icon_width, 
-			       (unsigned int *)&Tmp_win->icon_height, &JunkBW, &JunkDepth)) {
-		return;
+	if (Tmp_win->icon_w.win && !Tmp_win->forced)
+	{
+	    int pm_depth;
+	    Pixmap pm;
+
+	    pm = CreateIconWMhintsPixmap (Tmp_win, &pm_depth);
+	    if (pm != None)
+	    {
+		if (Tmp_win->icon_bm_w)
+		    XDestroyWindow(dpy, Tmp_win->icon_bm_w);
+		Tmp_win->icon_bm_w = CreateIconBMWindow (Tmp_win, 0, 0, pm, pm_depth);
+		XFreePixmap (dpy, pm);
+		RedoIconName();
 	    }
-
-	    pm = XCreatePixmap (dpy, Scr->Root, Tmp_win->icon_width,
-				Tmp_win->icon_height, Scr->d_depth);
-
-	    FB(Tmp_win->iconc.fore, Tmp_win->iconc.back);
-	    XCopyPlane(dpy, Tmp_win->wmhints->icon_pixmap, pm,
-		Scr->NormalGC,
-		0,0, Tmp_win->icon_width, Tmp_win->icon_height, 0, 0, 1 );
-
-	    valuemask = CWBackPixmap;
-	    attributes.background_pixmap = pm;
-
-	    if (Tmp_win->icon_bm_w)
-		XDestroyWindow(dpy, Tmp_win->icon_bm_w);
-
-	    Tmp_win->icon_bm_w =
-	      XCreateWindow (dpy, Tmp_win->icon_w, 0, 0,
-			     (unsigned int) Tmp_win->icon_width,
-			     (unsigned int) Tmp_win->icon_height,
-			     (unsigned int) 0, Scr->d_depth,
-			     (unsigned int) CopyFromParent, Scr->d_visual,
-			     valuemask, &attributes);
-
-	    XFreePixmap (dpy, pm);
-	    RedoIconName();
 	}
 	break;
 
@@ -918,6 +1005,18 @@ HandlePropertyNotify()
 	    FetchWmProtocols (Tmp_win);
 	    break;
 	}
+#ifdef TWM_USE_OPACITY
+	else if ((Event.xproperty.atom == _XA_NET_WM_WINDOW_OPACITY)
+			&& Event.xproperty.window == Tmp_win->w)
+	    switch (Event.xproperty.state) {
+	    case PropertyNewValue:
+		PropagateWindowOpacity (Tmp_win);
+		break;
+	    case PropertyDelete:
+		XDeleteProperty (dpy, Tmp_win->frame, _XA_NET_WM_WINDOW_OPACITY);
+		break;
+	    }
+#endif
 	break;
     }
 }
@@ -934,54 +1033,53 @@ RedoIconName()
 
     if (Tmp_win->list)
     {
-	/* let the expose event cause the repaint */
-	XClearArea(dpy, Tmp_win->list->w, 0,0,0,0, True);
-
 	if (Scr->SortIconMgr)
 	    SortIconManager(Tmp_win->list->iconmgr);
+	else
+	    SetIconManagerLabelShapeMask(Tmp_win->list);
+	    /* let the expose event cause the repaint */
+	    XClearArea(dpy, Tmp_win->list->w.win, 0,0,0,0, True);
     }
 
-    if (Tmp_win->icon_w == (Window) 0)
+    if (Tmp_win->icon_w.win == (Window) 0)
 	return;
 
     if (Tmp_win->icon_not_ours)
 	return;
 
-    Tmp_win->icon_w_width = MyFont_TextWidth(&Scr->IconFont,
-	Tmp_win->icon_name, strlen(Tmp_win->icon_name));
+    ComputeIconSize (Tmp_win, &x, &y);
 
-    Tmp_win->icon_w_width += 6;
-    if (Tmp_win->icon_w_width < Tmp_win->icon_width)
-    {
-	Tmp_win->icon_x = (Tmp_win->icon_width - Tmp_win->icon_w_width)/2;
-	Tmp_win->icon_x += 3;
-	Tmp_win->icon_w_width = Tmp_win->icon_width;
-    }
-    else
-    {
-	Tmp_win->icon_x = 3;
-    }
-
-    if (Tmp_win->icon_w_width == Tmp_win->icon_width)
-	x = 0;
-    else
-	x = (Tmp_win->icon_w_width - Tmp_win->icon_width)/2;
-
-    y = 0;
-
-    Tmp_win->icon_w_height = Tmp_win->icon_height + Scr->IconFont.height + 4;
-    Tmp_win->icon_y = Tmp_win->icon_height + Scr->IconFont.height;
-
-    XResizeWindow(dpy, Tmp_win->icon_w, Tmp_win->icon_w_width,
+    XResizeWindow(dpy, Tmp_win->icon_w.win, Tmp_win->icon_w_width,
 	Tmp_win->icon_w_height);
+
     if (Tmp_win->icon_bm_w)
     {
 	XMoveWindow(dpy, Tmp_win->icon_bm_w, x, y);
 	XMapWindow(dpy, Tmp_win->icon_bm_w);
     }
+
+    SetIconShapeMask(Tmp_win);
+
     if (Tmp_win->icon)
     {
-	XClearArea(dpy, Tmp_win->icon_w, 0, 0, 0, 0, True);
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE) {
+	    if (Tmp_win->icon_on == TRUE)
+		if (Scr->XCompMgrRunning == FALSE) {
+		    /*
+		     * We have no CWBackPixel set, so force "clean screen" hack.
+		     * (If icon width changes due to icon_name change, we would
+		     * actually have to deiconify+iconify to ensure correct
+		     * icon positioning!)
+		     */
+		    XUnmapWindow (dpy, Tmp_win->icon_w.win);
+		    XMapWindow (dpy, Tmp_win->icon_w.win);
+		    XFlush (dpy);
+		}
+	}
+	else
+#endif
+	    XClearArea(dpy, Tmp_win->icon_w.win, 0, 0, 0, 0, True);
     }
 }
 
@@ -1012,6 +1110,15 @@ HandleClientMessage()
 	    }
 	}
     }
+    else if (Tmp_win != NULL && Tmp_win->iconmgr == FALSE /* message for the 'frame' or 'icon' */
+	    && (Tmp_win->frame == Event.xclient.window || Tmp_win->icon_w.win == Event.xclient.window)
+	    && Event.xclient.message_type == _XA_WM_PROTOCOLS)
+    {
+	if (Event.xclient.data.l[0] == _XA_WM_DELETE_WINDOW)
+	    SendDeleteWindowMessage (Tmp_win, LastTimestamp());
+	else if (Event.xclient.data.l[0] == _XA_WM_SAVE_YOURSELF)
+	    SendSaveYourselfMessage (Tmp_win, LastTimestamp());
+    }
 }
 
 
@@ -1032,88 +1139,120 @@ HandleExpose()
     if (Event.xexpose.count != 0)
 	return;
 
-    if (Event.xany.window == Scr->InfoWindow && InfoLines)
+    if (Event.xany.window == Scr->InfoWindow.win && InfoLines)
     {
 	int i;
 	int height;
 
-	MyFont_ChangeGC(Scr->DefaultC.fore, Scr->DefaultC.back,
-	    &Scr->DefaultFont);
-
+#ifdef TWM_USE_SPACING
+	height = 120*Scr->DefaultFont.height/100; /*baselineskip 1.2*/
+#else
 	height = Scr->DefaultFont.height+2;
+#endif
+
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE)
+	{
+	    Picture pic_win = XRenderCreatePicture (dpy, Scr->InfoWindow.win, Scr->FormatRGB,
+							CPGraphicsExposure, &Scr->PicAttr);
+	    XGetGeometry (dpy, Scr->InfoWindow.win, &JunkRoot, &JunkX, &JunkY, &JunkWidth, &JunkHeight,
+							&JunkBW, &JunkDepth);
+	    if (Scr->XCompMgrRunning == TRUE)
+		XRenderFillRectangle (dpy, PictOpSrc, pic_win, &Scr->XRcol32Clear, 0, 0, JunkWidth, JunkHeight);
+	    XRenderFillRectangle (dpy, PictOpOver, pic_win, &Scr->XRcolDefaultB, 0, 0, JunkWidth, JunkHeight);
+	    XRenderFreePicture (dpy, pic_win);
+	}
+	else
+#endif
+	    XClearArea (dpy, Scr->InfoWindow.win, 0, 0, 0, 0, False);
+
 	for (i = 0; i < InfoLines; i++)
 	{
-	    MyFont_DrawString(dpy, Scr->InfoWindow, &Scr->DefaultFont, 
-		Scr->NormalGC, 5, (i*height) + Scr->DefaultFont.y, Info[i], 
-		strlen(Info[i]));
+	    MyFont_DrawString (&Scr->InfoWindow, &Scr->DefaultFont, &Scr->DefaultC,
+#ifdef TWM_USE_SPACING
+		    Scr->DefaultFont.height/2, (i*height) + Scr->DefaultFont.height,
+#else
+		    5, (i*height) + Scr->DefaultFont.y,
+#endif
+		    Info[i], strlen(Info[i]));
 	}
-	flush_expose (Event.xany.window);
     } 
     else if (Tmp_win != NULL)
     {
-	if (Event.xany.window == Tmp_win->title_w)
+	if (Event.xany.window == Tmp_win->title_w.win)
 	{
-	    MyFont_ChangeGC(Tmp_win->title.fore, Tmp_win->title.back,
-		&Scr->TitleBarFont);
-
-	    MyFont_DrawString (dpy, Tmp_win->title_w, &Scr->TitleBarFont,
-		Scr->NormalGC, Scr->TBInfo.titlex, Scr->TitleBarFont.y, 
-		Tmp_win->name, strlen(Tmp_win->name));
-	    flush_expose (Event.xany.window);
+	    MyFont_DrawImageStringEllipsis (&Tmp_win->title_w, &Scr->TitleBarFont,
+		&Tmp_win->TitleC, Scr->TBInfo.titlex, Scr->TitleBarFont.y,
+		Tmp_win->name, strlen (Tmp_win->name),
+		Tmp_win->title_width - Scr->TBInfo.titlex - Scr->TBInfo.rightoff - Scr->TitlePadding);
 	}
-	else if (Event.xany.window == Tmp_win->icon_w)
+	else if (Event.xany.window == Tmp_win->icon_w.win)
 	{
-	    MyFont_ChangeGC(Tmp_win->iconc.fore, Tmp_win->iconc.back,
-		&Scr->IconFont);
-
-	    MyFont_DrawString (dpy, Tmp_win->icon_w, &Scr->IconFont,
-		Scr->NormalGC, Tmp_win->icon_x, Tmp_win->icon_y,
-		Tmp_win->icon_name, strlen(Tmp_win->icon_name));
-	    flush_expose (Event.xany.window);
-	    return;
-	} else if (Tmp_win->titlebuttons) {
-	    int i;
-	    Window w = Event.xany.window;
-	    register TBWindow *tbw;
-	    int nb = Scr->TBInfo.nleft + Scr->TBInfo.nright;
-
-	    for (i = 0, tbw = Tmp_win->titlebuttons; i < nb; i++, tbw++) {
-		if (w == tbw->window) {
-		    register TitleButton *tb = tbw->info;
-
-		    FB(Tmp_win->title.fore, Tmp_win->title.back);
-		    XCopyPlane (dpy, tb->bitmap, w, Scr->NormalGC,
-				tb->srcx, tb->srcy, tb->width, tb->height,
-				tb->dstx, tb->dsty, 1);
-		    flush_expose (w);
-		    return;
-		}
+	    int l;
+#ifdef TWM_USE_RENDER
+	    if (Scr->use_xrender == TRUE)
+	    {
+		Picture pic_win = XRenderCreatePicture (dpy, Tmp_win->icon_w.win, Scr->FormatRGB,
+							CPGraphicsExposure, &Scr->PicAttr);
+		if (Scr->XCompMgrRunning == TRUE)
+		    XRenderFillRectangle (dpy, PictOpSrc, pic_win, &Scr->XRcol32Clear,
+					    0, 0, Tmp_win->icon_w_width, Tmp_win->icon_w_height);
+		XRenderComposite (dpy, PictOpOver, Tmp_win->PenIconB, Tmp_win->PicIconB, pic_win, 0, 0, 0, 0,
+					    0, 0, Tmp_win->icon_w_width, Tmp_win->icon_w_height);
+		XRenderFreePicture (dpy, pic_win);
 	    }
+#endif
+#ifdef TWM_USE_SPACING
+	    l = Tmp_win->icon_w_width - Scr->IconFont.height;
+#else
+	    l = Tmp_win->icon_w_width - 6;
+#endif
+	    MyFont_DrawImageStringEllipsis (&Tmp_win->icon_w, &Scr->IconFont,
+		&Tmp_win->IconC, Tmp_win->icon_x, Tmp_win->icon_y,
+		Tmp_win->icon_name, strlen (Tmp_win->icon_name), l);
 	}
-	if (Tmp_win->list) {
-	    if (Event.xany.window == Tmp_win->list->w)
+	else if (Tmp_win->list && Tmp_win->list->w.win == Event.xany.window)
+	{
+#ifdef TWM_USE_RENDER
+	    if (Scr->use_xrender == TRUE)
 	    {
-		MyFont_ChangeGC(Tmp_win->list->fore, Tmp_win->list->back,
-		    &Scr->IconManagerFont);
-		MyFont_DrawString (dpy, Event.xany.window,
-		    &Scr->IconManagerFont, Scr->NormalGC,
-		    iconmgr_textx, Scr->IconManagerFont.y+4,
-		    Tmp_win->icon_name, strlen(Tmp_win->icon_name));
-		DrawIconManagerBorder(Tmp_win->list);
-		flush_expose (Event.xany.window);
-		return;
+		Picture pen, pic_win;
+		pic_win = XRenderCreatePicture (dpy, Tmp_win->list->iconmgr->twm_win->frame, Scr->FormatRGB,
+						(CPGraphicsExposure|CPSubwindowMode), &Scr->PicAttr);
+		if (Scr->XCompMgrRunning == TRUE)
+		    XRenderFillRectangle (dpy, PictOpSrc, pic_win, &Scr->XRcol32Clear,
+					Tmp_win->list->x, Tmp_win->list->y+Tmp_win->list->iconmgr->twm_win->title_height,
+					Tmp_win->list->width, Tmp_win->list->height);
+
+		if (Scr->Highlight && (Tmp_win->list->iconmgr->hilited == Tmp_win->list && Scr->FilledIconMgrHighlight == TRUE))
+		    pen = Tmp_win->list->PenIconMgrH;
+		else
+		    pen = Tmp_win->list->PenIconMgrB;
+
+		XRenderComposite (dpy, PictOpOver, pen, Tmp_win->list->PicIconMgrB, pic_win, 0, 0, 0, 0,
+					Tmp_win->list->x, Tmp_win->list->y+Tmp_win->list->iconmgr->twm_win->title_height,
+					Tmp_win->list->width, Tmp_win->list->height);
+		XRenderFreePicture (dpy, pic_win);
+		XClearArea (dpy, Tmp_win->list->icon, 0, 0, 0, 0, False); /* repaint "iconified" knob */
 	    }
-	    if (Event.xany.window == Tmp_win->list->icon)
-	    {
-		FB(Tmp_win->list->fore, Tmp_win->list->back);
-		XCopyPlane(dpy, Scr->siconifyPm, Tmp_win->list->icon,
-		    Scr->NormalGC,
-		    0,0, iconifybox_width, iconifybox_height, 0, 0, 1);
-		flush_expose (Event.xany.window);
-		return;
-	    }
+	    else
+#endif
+		XClearArea (dpy, Tmp_win->list->w.win, 0, 0, 0, 0, False);
+
+	    MyFont_DrawStringEllipsis (&Tmp_win->list->w,
+		    &Scr->IconManagerFont, &Tmp_win->list->IconManagerC,
+#ifdef TWM_USE_SPACING
+		    Scr->iconmgr_textx, Scr->IconManagerFont.y
+			+ (Tmp_win->list->height-Scr->IconManagerFont.height)/2,
+#else
+		    Scr->iconmgr_textx, Scr->IconManagerFont.y+4,
+#endif
+		    Tmp_win->icon_name, strlen(Tmp_win->icon_name),
+		    Tmp_win->list->width - Scr->iconmgr_textx - Scr->IconManagerFont.ellen/2);
+	    DrawIconManagerBorder (Tmp_win->list);
 	} 
     }
+    flush_expose (Event.xany.window);
 }
 
 
@@ -1141,6 +1280,16 @@ static void remove_window_from_ring (TwmWindow *tmp)
     if (!Scr->Ring || Scr->RingLeader == tmp) Scr->RingLeader = Scr->Ring;
 }
 
+void DiscardWindowEvents (Window w, long exceptions)
+{
+    XEvent e;
+
+    /* drop events of all types not including 'exceptions': */
+    while (True == XCheckWindowEvent (dpy, w, ~exceptions, &e)) {
+	continue;
+    }
+}
+
 
 
 /**
@@ -1160,24 +1309,20 @@ HandleDestroyNotify()
     if (Tmp_win == NULL)
 	return;
 
-    if (Tmp_win == Scr->Focus)
-    {
-	FocusOnRoot();
-    }
     XDeleteContext(dpy, Tmp_win->w, TwmContext);
     XDeleteContext(dpy, Tmp_win->w, ScreenContext);
     XDeleteContext(dpy, Tmp_win->frame, TwmContext);
     XDeleteContext(dpy, Tmp_win->frame, ScreenContext);
-    if (Tmp_win->icon_w)
+    if (Tmp_win->icon_w.win)
     {
-	XDeleteContext(dpy, Tmp_win->icon_w, TwmContext);
-	XDeleteContext(dpy, Tmp_win->icon_w, ScreenContext);
+	XDeleteContext(dpy, Tmp_win->icon_w.win, TwmContext);
+	XDeleteContext(dpy, Tmp_win->icon_w.win, ScreenContext);
     }
     if (Tmp_win->title_height)
     {
 	int nb = Scr->TBInfo.nleft + Scr->TBInfo.nright;
-	XDeleteContext(dpy, Tmp_win->title_w, TwmContext);
-	XDeleteContext(dpy, Tmp_win->title_w, ScreenContext);
+	XDeleteContext(dpy, Tmp_win->title_w.win, TwmContext);
+	XDeleteContext(dpy, Tmp_win->title_w.win, ScreenContext);
 	if (Tmp_win->hilite_w)
 	{
 	    XDeleteContext(dpy, Tmp_win->hilite_w, TwmContext);
@@ -1191,6 +1336,10 @@ HandleDestroyNotify()
 				ScreenContext);
 	    }
         }
+#ifdef TWM_USE_XFT
+	if (Scr->use_xft > 0)
+	    MyXftDrawDestroy (Tmp_win->title_w.xft);
+#endif
     }
 
     if (Scr->cmapInfo.cmaps == &Tmp_win->cmaps)
@@ -1214,11 +1363,31 @@ HandleDestroyNotify()
     if (Tmp_win->gray) XFreePixmap (dpy, Tmp_win->gray);
 
     XDestroyWindow(dpy, Tmp_win->frame);
-    if (Tmp_win->icon_w && !Tmp_win->icon_not_ours) {
-	XDestroyWindow(dpy, Tmp_win->icon_w);
+    XSync (dpy, False);
+    DiscardWindowEvents (Tmp_win->w, (/*SubstructureNotifyMask|*/StructureNotifyMask)); /*drop Enter/Leave etc*/
+    DiscardWindowEvents (Tmp_win->frame, SubstructureRedirectMask); /* -"- */
+
+    if (Tmp_win->title_height) /*drop Expose etc*/
+	DiscardWindowEvents (Tmp_win->title_w.win, NoEventMask);
+
+    if (Tmp_win->icon_w.win && !Tmp_win->icon_not_ours) {
+#ifdef TWM_USE_XFT
+	if (Scr->use_xft > 0)
+	    MyXftDrawDestroy(Tmp_win->icon_w.xft);
+#endif
+#ifdef TWM_USE_RENDER
+	if (Tmp_win->PicIconB != None)
+	    XRenderFreePicture (dpy, Tmp_win->PicIconB);
+	if (Tmp_win->PenIconB != None)
+	    XRenderFreePicture (dpy, Tmp_win->PenIconB);
+#endif
+	XDestroyWindow(dpy, Tmp_win->icon_w.win);
+	DiscardWindowEvents (Tmp_win->icon_w.win, NoEventMask);
 	IconDown (Tmp_win);
     }
+
     RemoveIconManager(Tmp_win);					/* 7 */
+
     Tmp_win->prev->next = Tmp_win->next;
     if (Tmp_win->next != NULL)
 	Tmp_win->next->prev = Tmp_win->prev;
@@ -1248,8 +1417,7 @@ void
 HandleCreateNotify()
 {
 #ifdef DEBUG_EVENTS
-    fprintf(stderr, "CreateNotify w = 0x%x\n", Event.xcreatewindow.window);
-    fflush(stderr);
+    fprintf(stderr, "events.c -- HandleCreateNotify(): win = 0x%08lx\n", (long)(Event.xcreatewindow.window));
     Bell(XkbBI_Info,0,Event.xcreatewindow.window);
     XSync(dpy, 0);
 #endif
@@ -1263,12 +1431,11 @@ HandleCreateNotify()
 void
 HandleMapRequest()
 {
-    int stat;
-    int zoom_save;
+    int state;
 
     Event.xany.window = Event.xmaprequest.window;
-    stat = XFindContext(dpy, Event.xany.window, TwmContext, (caddr_t *)&Tmp_win);
-    if (stat == XCNOENT)
+    state = XFindContext(dpy, Event.xany.window, TwmContext, (caddr_t *)&Tmp_win);
+    if (state == XCNOENT)
 	Tmp_win = NULL;
 
     /* If the window has never been mapped before ... */
@@ -1278,6 +1445,10 @@ HandleMapRequest()
 	Tmp_win = AddWindow(Event.xany.window, FALSE, (IconMgr *) NULL);
 	if (Tmp_win == NULL)
 	    return;
+
+#ifdef TWM_USE_OPACITY
+	PropagateWindowOpacity (Tmp_win);
+#endif
     }
     else
     {
@@ -1290,43 +1461,70 @@ HandleMapRequest()
     }
 
     /* If it's not merely iconified, and we have hints, use them. */
-    if ((! Tmp_win->icon) &&
-	Tmp_win->wmhints && (Tmp_win->wmhints->flags & StateHint))
+    if ((Tmp_win->icon == FALSE)
+	    /* use WM_STATE if enabled */
+	&& ((RestartPreviousState == TRUE && GetWMState(Tmp_win->w, &state, &JunkChild) == True)
+	    || (Tmp_win->wmhints && (Tmp_win->wmhints->flags & StateHint)
+			&& (state=Tmp_win->wmhints->initial_state) == state)))
     {
-	int state;
-	Window icon;
+	int zoom_save;
 
-	/* use WM_STATE if enabled */
-	if (!(RestartPreviousState && GetWMState(Tmp_win->w, &state, &icon) &&
-	      (state == NormalState || state == IconicState)))
-	  state = Tmp_win->wmhints->initial_state;
-
-	switch (state) 
+	switch (state)
 	{
-	    case DontCareState:
-	    case NormalState:
 	    case ZoomState:
+		if (Scr->ZoomFunc != ZOOM_NONE)
+		    fullzoom (Scr->ZoomPanel, Tmp_win, Scr->ZoomFunc);
+	    case NormalState:
 	    case InactiveState:
-		XMapWindow(dpy, Tmp_win->w);
-		XMapWindow(dpy, Tmp_win->frame);
-		SetMapStateProp(Tmp_win, NormalState);
-		SetRaiseWindow (Tmp_win);
+#if DontCareState != WithdrawnState
+	    case DontCareState:
+#endif
+		XMapWindow (dpy, Tmp_win->w);
+		XMapWindow (dpy, Tmp_win->frame);
+		SetMapStateProp (Tmp_win, NormalState);
 		break;
 
 	    case IconicState:
+#if DontCareState == WithdrawnState
+	    case WithdrawnState:
+#endif
 		zoom_save = Scr->DoZoom;
 		Scr->DoZoom = FALSE;
-		Iconify(Tmp_win, 0, 0);
+		Iconify (Tmp_win, 0, 0);
 		Scr->DoZoom = zoom_save;
-		break;
+		CheckXUrgencyHint (Tmp_win);
+	    default:
+		return;
 	}
     }
-    /* If no hints, or currently an icon, just "deiconify" */
     else
-    {
-	DeIconify(Tmp_win);
-	SetRaiseWindow (Tmp_win);
-    }
+	/* If no hints, or currently an icon, just "deiconify" */
+	DeIconify (Tmp_win);
+
+    SetRaiseWindow (Tmp_win);
+
+    CheckXUrgencyHint (Tmp_win);
+
+#ifdef TWM_USE_SLOPPYFOCUS
+    if (HandlingEvents == TRUE && ((SloppyFocus == TRUE) || (FocusRoot == TRUE)))
+#else
+    if (HandlingEvents == TRUE && FocusRoot == TRUE) /* only warp if f.focus is not active */
+#endif
+	if ((Scr->WarpCursorL != NULL) || (Scr->NoWarpCursorL != NULL) || (Scr->WarpCursor == TRUE))
+	{
+	    /* warp to the transient window if top-level client has focus: */
+	    if (Tmp_win->transient && Focus != NULL) {
+		if ((Tmp_win->transientfor == Focus->w) || (Tmp_win->group == Focus->group))
+		    WarpToWindow (Tmp_win);
+	    } else if (Scr->WarpCursorL != NULL) {
+		if (LookInList(Scr->WarpCursorL, Tmp_win->full_name, &Tmp_win->class) != NULL)
+		    WarpToWindow (Tmp_win);
+	    } else if (Scr->NoWarpCursorL != NULL) {
+		if (LookInList(Scr->NoWarpCursorL, Tmp_win->full_name, &Tmp_win->class) == NULL)
+		    WarpToWindow (Tmp_win);
+	    } else if (Scr->WarpCursor == TRUE)
+		WarpToWindow (Tmp_win);
+	}
 }
 
 
@@ -1356,12 +1554,12 @@ HandleMapNotify()
      * when it really isn't.
      */
     XGrabServer (dpy);
-    if (Tmp_win->icon_w)
-	XUnmapWindow(dpy, Tmp_win->icon_w);
-    if (Tmp_win->title_w)
-	XMapSubwindows(dpy, Tmp_win->title_w);
+    if (Tmp_win->icon_w.win)
+	XUnmapWindow(dpy, Tmp_win->icon_w.win);
+    if (Tmp_win->title_w.win)
+	XMapSubwindows(dpy, Tmp_win->title_w.win);
     XMapSubwindows(dpy, Tmp_win->frame);
-    if (Scr->Focus != Tmp_win && Tmp_win->hilite_w)
+    if (Focus != Tmp_win && Tmp_win->hilite_w)
 	XUnmapWindow(dpy, Tmp_win->hilite_w);
 
     XMapWindow(dpy, Tmp_win->frame);
@@ -1380,8 +1578,9 @@ HandleMapNotify()
 void
 HandleUnmapNotify()
 {
-    int dstx, dsty;
-    Window dumwin;
+    int dstx, dsty, nchild;
+    Window *child;
+    Bool state;
 
     /*
      * The July 27, 1988 ICCCM spec states that a client wishing to switch
@@ -1402,6 +1601,9 @@ HandleUnmapNotify()
     if (Tmp_win == NULL || (!Tmp_win->mapped && !Tmp_win->icon))
 	return;
 
+    if (Tmp_win == Focus)
+	FocusOnRoot();
+
     /*
      * The program may have unmapped the client window, from either
      * NormalState or IconicState.  Handle the transition to WithdrawnState.
@@ -1412,27 +1614,59 @@ HandleUnmapNotify()
      */
 
     XGrabServer (dpy);
-    if (XTranslateCoordinates (dpy, Event.xunmap.window, Tmp_win->attr.root,
-			       0, 0, &dstx, &dsty, &dumwin)) {
+
+    /* check if the client window exists: */
+    state = False;
+    nchild = 0;
+    child = NULL;
+    if (XQueryTree (dpy, Tmp_win->frame, &JunkRoot, &JunkChild, &child, &nchild))
+	if (child != NULL) {
+	    while (nchild-- > 0)
+		if (child[nchild] == Tmp_win->w /*Event.xunmap.window*/) {
+		    state = True;
+		    XTranslateCoordinates (dpy, Tmp_win->w /*Event.xunmap.window*/,
+				Tmp_win->attr.root, 0, 0, &dstx, &dsty, &JunkChild);
+		    break;
+		}
+	    XFree (child);
+	}
+
+    if (state == True)
+    {
 	XEvent ev;
-	Bool reparented = XCheckTypedWindowEvent (dpy, Event.xunmap.window, 
-						  ReparentNotify, &ev);
+	Bool reparented = XCheckTypedWindowEvent (dpy,
+					Tmp_win->w /*Event.xunmap.window*/,
+					ReparentNotify, &ev);
 	SetMapStateProp (Tmp_win, WithdrawnState);
 	if (reparented) {
 	    if (Tmp_win->old_bw) XSetWindowBorderWidth (dpy,
-							Event.xunmap.window, 
-							Tmp_win->old_bw);
+					Tmp_win->w /*Event.xunmap.window*/,
+					Tmp_win->old_bw);
 	    if (Tmp_win->wmhints && (Tmp_win->wmhints->flags & IconWindowHint))
 	      XUnmapWindow (dpy, Tmp_win->wmhints->icon_window);
 	} else {
-	    XReparentWindow (dpy, Event.xunmap.window, Tmp_win->attr.root,
-			     dstx, dsty);
+	    XReparentWindow (dpy, Tmp_win->w /*Event.xunmap.window*/,
+				Tmp_win->attr.root,
+				dstx, dsty);
 	    RestoreWithdrawnLocation (Tmp_win);
 	}
-	XRemoveFromSaveSet (dpy, Event.xunmap.window);
-	XSelectInput (dpy, Event.xunmap.window, NoEventMask);
+	XRemoveFromSaveSet (dpy, Tmp_win->w /*Event.xunmap.window*/);
+	XSelectInput (dpy, Tmp_win->w /*Event.xunmap.window*/, NoEventMask);
 	HandleDestroyNotify ();		/* do not need to mash event before */
-    } /* else window no longer exists and we'll get a destroy notify */
+    }
+    else /* window no longer exists and we'll get a destroy notify */
+    {
+#if 0
+	XUnmapWindow (dpy, Tmp_win->frame);
+	XSync (dpy, False);
+	DiscardWindowEvents (Tmp_win->w, (SubstructureNotifyMask|StructureNotifyMask));
+	DiscardWindowEvents (Tmp_win->frame, SubstructureRedirectMask);
+	Tmp_win->mapped = FALSE; /* avoid FocusIn/Out, Enter/Leave events */
+	Tmp_win->icon = TRUE;
+	Tmp_win->icon_on = FALSE;
+#endif
+    }
+
     XUngrabServer (dpy);
     XFlush (dpy);
 }
@@ -1472,12 +1706,12 @@ HandleMotionNotify()
 void
 HandleButtonRelease()
 {
-    int xl, xr, yt, yb, w, h;
+    int xl, yt, w, h;
     unsigned mask;
 
     if (InfoLines) 		/* delete info box on 2nd button release  */
       if (Context == C_IDENTIFY) {
-	XUnmapWindow(dpy, Scr->InfoWindow);
+	XUnmapWindow(dpy, Scr->InfoWindow.win);
 	InfoLines = 0;
 	Context = C_NO_CONTEXT;
       }
@@ -1518,20 +1752,7 @@ HandleButtonRelease()
 	}
 	
 	if (Scr->DontMoveOff && MoveFunction != F_FORCEMOVE)
-	{
-	    xr = xl + w;
-	    yb = yt + h;
-
-	    if (xl < 0)
-		xl = 0;
-	    if (xr > Scr->MyDisplayWidth)
-		xl = Scr->MyDisplayWidth - w;
-
-	    if (yt < 0)
-		yt = 0;
-	    if (yb > Scr->MyDisplayHeight)
-		yt = Scr->MyDisplayHeight - h;
-	}
+	    EnsureRectangleOnScreen (&xl, &yt, w, h);
 
 	CurrentDragX = xl;
 	CurrentDragY = yt;
@@ -1694,7 +1915,25 @@ HandleButtonPress()
 
     XSync(dpy, 0);			/* XXX - remove? */
 
+#if 1
+/*
+ * Lets suppose we have info-window mapped.  Further, lets suppose
+ * we have a menu bound to the title bar tied to some mouse button.
+ * Now press this button, the menu gets mapped. Don't release this
+ * button but press some other one.  We execute this handler here
+ * again, and few lines above we take the menu down. Then we enter
+ * the 'if' statement below and grab the pointer. Next, releasing
+ * one of the buttons we execute HandleButtonRelease() above and
+ * bypass all code, the 'mask' calculation doesn't result in releasing
+ * the grab we obtain below.  So only killing twm releases the grab.
+ *
+ * Until a proper solution to this problem is found lets suppose we
+ * have no info window mapped.
+ */
+    if (ButtonPressed != -1)
+#else
     if (ButtonPressed != -1 && !InfoLines) /* want menus if we have info box */
+#endif
     {
 	/* we got another butt press in addition to one still held
 	 * down, we need to cancel the operation we were doing
@@ -1709,7 +1948,7 @@ HandleButtonPress()
 	    MoveOutline(Scr->Root, 0, 0, 0, 0, 0, 0);
 	  }
 	}
-	XUnmapWindow(dpy, Scr->SizeWindow);
+	XUnmapWindow(dpy, Scr->SizeWindow.win);
 	if (!Scr->OpaqueMove)
 	    UninstallRootColormap();
 	ResizeWindow = None;
@@ -1761,7 +2000,7 @@ HandleButtonPress()
 
     Context = C_NO_CONTEXT;
 
-    if (Event.xany.window == Scr->InfoWindow)
+    if (Event.xany.window == Scr->InfoWindow.win)
       Context = C_IDENTIFY;
 
     if (Event.xany.window == Scr->Root)
@@ -1769,7 +2008,7 @@ HandleButtonPress()
     if (Tmp_win)
     {
 	if (Tmp_win->list && RootFunction != 0 &&
-	    (Event.xany.window == Tmp_win->list->w ||
+	    (Event.xany.window == Tmp_win->list->w.win ||
 		Event.xany.window == Tmp_win->list->icon))
 	{
 	    Tmp_win = Tmp_win->list->iconmgr->twm_win;
@@ -1782,7 +2021,7 @@ HandleButtonPress()
 	    Event.xany.window = Tmp_win->w;
 	    Context = C_WINDOW;
 	}
-	else if (Event.xany.window == Tmp_win->title_w)
+	else if (Event.xany.window == Tmp_win->title_w.win)
 	{
 	    Context = C_TITLE;
 	}
@@ -1791,11 +2030,11 @@ HandleButtonPress()
 	    printf("ERROR! ERROR! ERROR! YOU SHOULD NOT BE HERE!!!\n");
 	    Context = C_WINDOW;
 	}
-	else if (Event.xany.window == Tmp_win->icon_w)
+	else if (Event.xany.window == Tmp_win->icon_w.win)
 	{
 	    Context = C_ICON;
 	}
-	else if (Event.xany.window == Tmp_win->frame) 
+	else if (Event.xany.window == Tmp_win->frame)
 	{
 	    /* since we now place a button grab on the frame instead
              * of the window, (see GrabButtons() in add_window.c), we
@@ -1815,7 +2054,7 @@ HandleButtonPress()
             else Context = C_FRAME;
 	}
 	else if (Tmp_win->list &&
-	    (Event.xany.window == Tmp_win->list->w ||
+	    (Event.xany.window == Tmp_win->list->w.win ||
 		Event.xany.window == Tmp_win->list->icon))
 	{
 	    Tmp_win->list->down = TRUE;
@@ -1861,9 +2100,17 @@ HandleButtonPress()
 	}
 
 	/* make sure we are not trying to move an identify window */
-	if (Event.xany.window != Scr->InfoWindow)
+	if (Event.xany.window != Scr->InfoWindow.win)
+{
+#ifdef DEBUG_HOTBUTTONS
+	    if (PrintErrorMessages) {
+		extern char *return_keyword(), *return_context(), *return_modifiers();
+		fprintf (stderr, "HandleButtonPress(): Executing Button%d modifiers '%s' RootFunction '%s (%d)' arg = '%s' for context '%s'\n", Event.xbutton.button, return_modifiers(Event.xbutton.state), return_keyword(RootFunction), RootFunction, (Action?Action:""), return_context(Context));
+	  }
+#endif
 	  ExecuteFunction(RootFunction, Action, Event.xany.window,
 			  Tmp_win, &Event, Context, FALSE);
+}
 
 	RootFunction = 0;
 	return;
@@ -1890,6 +2137,12 @@ HandleButtonPress()
     {
 	Action = Scr->Mouse[Event.xbutton.button][Context][modifier].item ?
 	    Scr->Mouse[Event.xbutton.button][Context][modifier].item->action : NULL;
+#if defined DEBUG_HOTBUTTONS && 1 /*on/off*/
+	if (PrintErrorMessages) {
+	    extern char *return_keyword(), *return_context(), *return_modifiers();
+	    fprintf (stderr, "HandleButtonPress(): Triggering Button%d pressed-mod '%s (twm-mod 0x0%x, twm-used = 0x0%x)' function '%s (%d)' arg = '%s' for context '%s' (frame=0x0%lx client=0x0%lx)\n", Event.xbutton.button, return_modifiers(Event.xbutton.state), modifier, mods_used, return_keyword(Scr->Mouse[Event.xbutton.button][Context][modifier].func), Scr->Mouse[Event.xbutton.button][Context][modifier].func, (Action?Action:""), return_context(Context), (long)(Tmp_win?Tmp_win->frame:-1), (long)(Tmp_win?Tmp_win->w:-1));
+	}
+#endif
 	ExecuteFunction(Scr->Mouse[Event.xbutton.button][Context][modifier].func,
 	    Action, Event.xany.window, Tmp_win, &Event, Context, FALSE);
     }
@@ -1911,44 +2164,6 @@ HandleButtonPress()
 
 
 
-/** \fn HENQueueScanner
- * EnterNotify event q scanner.
- *
- *	Looks at the queued events and determines if any matching
- *	LeaveNotify events or EnterEvents deriving from the
- *	termination of a grab are behind this event to allow
- *	skipping of unnecessary processing.
- */
-typedef struct HENScanArgs {
-    Window w;		/**< Window we are currently entering */
-    Bool leaves;	/**< Any LeaveNotifies found for this window */
-    Bool inferior;	/**< Was NotifyInferior the mode for LeaveNotify */
-    Bool enters;	/**< Any EnterNotify events with NotifyUngrab */
-} HENScanArgs;
-
-static Bool
-HENQueueScanner(Display *dpy, XEvent *ev, char *args)
-{
-    if (ev->type == LeaveNotify) {
-	if (ev->xcrossing.window == ((HENScanArgs *) args)->w &&
-	    ev->xcrossing.mode == NotifyNormal) {
-	    ((HENScanArgs *) args)->leaves = True;
-	    /*
-	     * Only the last event found matters for the Inferior field.
-	     */
-	    ((HENScanArgs *) args)->inferior =
-		(ev->xcrossing.detail == NotifyInferior);
-	}
-    } else if (ev->type == EnterNotify) {
-	if (ev->xcrossing.mode == NotifyUngrab)
-	    ((HENScanArgs *) args)->enters = True;
-    }
-
-    return (False);
-}
-
-
-
 /**
  * EnterNotify event handler
  */
@@ -1956,23 +2171,6 @@ void
 HandleEnterNotify()
 {
     MenuRoot *mr;
-    XEnterWindowEvent *ewp = &Event.xcrossing;
-    HENScanArgs scanArgs;
-    XEvent dummy;
-    
-    /*
-     * Save the id of the window entered.  This will be used to remove
-     * border highlight on entering the next application window.
-     */
-    if (UnHighLight_win && ewp->window != UnHighLight_win->w) {
-      SetBorder (UnHighLight_win, False);	/* application window */
-      if (UnHighLight_win->list) /* in the icon box */
-	NotActiveIconManager(UnHighLight_win->list);
-    }
-    if (ewp->window == Scr->Root)
-      UnHighLight_win = NULL;
-    else if (Tmp_win)
-      UnHighLight_win = Tmp_win;
 
     /*
      * if we aren't in the middle of menu processing
@@ -1982,101 +2180,212 @@ HandleEnterNotify()
 	 * We're not interested in pseudo Enter/Leave events generated
 	 * from grab initiations.
 	 */
-	if (ewp->mode == NotifyGrab)
+	if (Event.xcrossing.mode == NotifyGrab || Event.xcrossing.detail == NotifyPointer)
 	    return;
-
-	/*
-	 * Scan for Leave and Enter Notify events to see if we can avoid some
-	 * unnecessary processing.
-	 */
-	scanArgs.w = ewp->window;
-	scanArgs.leaves = scanArgs.enters = False;
-	(void) XCheckIfEvent(dpy, &dummy, HENQueueScanner, (char *) &scanArgs);
 
 	/*
 	 * if entering root window, restore twm default colormap so that 
 	 * titlebars are legible
 	 */
-	if (ewp->window == Scr->Root) {
-	    if (!scanArgs.leaves && !scanArgs.enters)
+	if (Event.xcrossing.window == Scr->Root) {
+	    if (FocusRoot == TRUE)
 		InstallWindowColormaps(EnterNotify, &Scr->TwmRoot);
 	    return;
 	}
 
 	/*
+	 * We're not interested in Enter events while coming
+	 * from subwindows (client 'w', 'title_w').
+	 */
+	if (Event.xcrossing.detail == NotifyInferior)
+	    return;
+
+	/*
 	 * if we have an event for a specific one of our windows
 	 */
-	if (Tmp_win) {
+	if (Tmp_win != NULL)
+	{
+	    int inicon = WinIsIconMgrEntry (Event.xcrossing.window, Tmp_win);
+
+	    if ((Event.xcrossing.window == Tmp_win->frame) || inicon)
+		SetBorder (Tmp_win, True);
+
 	    /*
 	     * If currently in PointerRoot mode (indicated by FocusRoot), then
 	     * focus on this window
 	     */
-	    if (Scr->FocusRoot && (!scanArgs.leaves || scanArgs.inferior)) {
-		if (Tmp_win->list) ActiveIconManager(Tmp_win->list);
-		if (Tmp_win->mapped) {
-		    /*
-		     * unhighlight old focus window
-		     */
-		    if (Scr->Focus &&
-			Scr->Focus != Tmp_win && Tmp_win->hilite_w)
-		      XUnmapWindow(dpy, Scr->Focus->hilite_w);
 
+#ifdef TWM_USE_SLOPPYFOCUS
+	    /*
+	     * If both SloppyFocus and TitleFocus are 'TRUE' we need to ensure the client
+	     * colormap gets installed as we enter the client window.  Focus is already
+	     * there (since the 'Enter'-event into the frame), resulting in skipping the
+	     * relevant part of the below 'if' statement, therefore unfortunately
+	     * a special case handling here is necessary.
+	     */
+	    if (SloppyFocus == TRUE && Tmp_win == Focus
+		    && Scr->TitleFocus == TRUE && Event.xcrossing.window == Tmp_win->w)
+	    {
+		InstallWindowColormaps (EnterNotify, Tmp_win);
+	    }
+
+	    else if ((SloppyFocus == TRUE && Tmp_win != Focus) || (FocusRoot == TRUE))
+#else
+	    if (FocusRoot == TRUE)
+#endif
+	    {
+		int input = (AcceptsInput(Tmp_win) || ExpectsTakeFocus(Tmp_win));
+
+		if (Tmp_win->mapped == TRUE)
+		{
 		    /*
 		     * If entering the frame or the icon manager, then do 
 		     * "window activation things":
 		     *
-		     *     1.  turn on highlight window (if any)
-		     *     2.  install frame colormap
-		     *     3.  set frame and highlight window (if any) border
-		     *     4.  focus on client window to forward typing
-		     *     4a. same as 4 but for icon mgr w/with NoTitlebar on.
-		     *     5.  send WM_TAKE_FOCUS if requested
+		     *     1.  install frame colormap
+		     *     2.  focus on client window to forward typing
+		     *     2a. same as 2 but for icon mgr w/with NoTitlebar on.
+		     *     3.  send WM_TAKE_FOCUS if requested
 		     */
-		    if (ewp->window == Tmp_win->frame ||
-			(Tmp_win->list && ewp->window == Tmp_win->list->w)) {
-			if (Tmp_win->hilite_w)				/* 1 */
-			  XMapWindow (dpy, Tmp_win->hilite_w);
-			if (!scanArgs.leaves && !scanArgs.enters)
-			    InstallWindowColormaps (EnterNotify,	/* 2 */
-						    &Scr->TwmRoot);
-			SetBorder (Tmp_win, True);			/* 3 */
-			if (Tmp_win->title_w && Scr->TitleFocus &&	/* 4 */
-			    Tmp_win->wmhints && Tmp_win->wmhints->input)
-			  SetFocus (Tmp_win, ewp->time);
-			if (Scr->NoTitlebar && Scr->TitleFocus &&	/*4a */
-			    Tmp_win->wmhints && Tmp_win->wmhints->input)
-			  SetFocus (Tmp_win, ewp->time);
-			if (Tmp_win->protocols & DoesWmTakeFocus)	/* 5 */
-			  SendTakeFocusMessage (Tmp_win, ewp->time);
-			Scr->Focus = Tmp_win;
-		    } else if (ewp->window == Tmp_win->w) {
-			/*
-			 * If we are entering the application window, install
-			 * its colormap(s).
-			 */
-			if (!scanArgs.leaves || scanArgs.inferior)
-			    InstallWindowColormaps(EnterNotify, Tmp_win);
+
+		    if ((Event.xcrossing.window == Tmp_win->frame) || inicon)
+		    {
+#if 1
+			if (Scr->TwmRoot.cmaps.number_cwins > 1)
+			{
+			    if (Event.xcrossing.window == Tmp_win->frame
+				&& 0 < Tmp_win->title_height && Event.xcrossing.y < Tmp_win->title_height)
+			    {
+				/* we entered frame over title-bar, load twm colormap */
+				int i = Scr->TwmRoot.cmaps.number_cwins-1;
+				ColormapWindow *cwins = Scr->TwmRoot.cmaps.cwins[0];
+				/* bump screen/twm colormap: */
+				Scr->TwmRoot.cmaps.cwins[0] = Scr->TwmRoot.cmaps.cwins[i];  Scr->TwmRoot.cmaps.cwins[i] = cwins;
+				Scr->TwmRoot.cmaps.cwins[0]->colormap->state = Scr->TwmRoot.cmaps.cwins[i]->colormap->state = 0;
+				InstallWindowColormaps (EnterNotify, &Scr->TwmRoot);
+				/* unbump screen/twm colormap: */
+				Scr->TwmRoot.cmaps.cwins[i] = Scr->TwmRoot.cmaps.cwins[0];  Scr->TwmRoot.cmaps.cwins[0] = cwins;
+			    }
+#if 1
+			    else if (inicon) /* we are over its iconmanager entry, load client colormap */
+				InstallWindowColormaps (EnterNotify, Tmp_win);
+#endif
+			}
+			else
+#endif
+			    InstallWindowColormaps (EnterNotify, &Scr->TwmRoot); /* 1 */
+
+			if (input && (Scr->TitleFocus == TRUE))
+			{
+			    if (AcceptsInput(Tmp_win)) /* 2, 2a */
+				SetFocus (Tmp_win, Event.xcrossing.time);
+			    else if (Tmp_win->hilite_w)
+				/* ...no FocusIn event coming: */
+				XMapWindow (dpy, Tmp_win->hilite_w);
+
+			    if (ExpectsTakeFocus(Tmp_win)) /* 3 */
+				SendTakeFocusMessage (Tmp_win, Event.xcrossing.time);
+#ifdef TWM_USE_SLOPPYFOCUS
+			    if (SloppyFocus == TRUE)
+				FocusRoot = FALSE;
+#endif
+			    Focus = Tmp_win;
+			    HighLightIconManager (Focus);
+			}
+			else /* client accepts no input, or TitleFocus is FALSE; in iconmgr or not */
+			{
+#ifdef TWM_USE_SLOPPYFOCUS
+			    if (FocusRoot == FALSE) {
+				UnHighLightIconManager();
+				FocusOnRoot();
+			    }
+#endif
+			    if (Tmp_win->list != NULL)
+				SetIconMgrEntryActive (Tmp_win->list);
+			}
 		    }
-		}			/* end if Tmp_win->mapped */
-		if (Tmp_win->wmhints != NULL &&
-			ewp->window == Tmp_win->wmhints->icon_window &&
-			(!scanArgs.leaves || scanArgs.inferior))
-			    InstallWindowColormaps(EnterNotify, Tmp_win);
-	    }				/* end if FocusRoot */
+		    else if (Event.xcrossing.window == Tmp_win->w)
+		    {
+			if (input && (Scr->TitleFocus == FALSE))
+			{
+#ifdef TWM_USE_SLOPPYFOCUS
+			    if (SloppyFocus == TRUE)
+			    {
+				FocusRoot = FALSE;
+				if (AcceptsInput(Tmp_win))
+				    SetFocus (Tmp_win, Event.xcrossing.time);
+			    }
+			    else /*fallthrough*/
+#endif
+			    if (ExpectsTakeFocus(Tmp_win)) {
+				if (ExpectsInput(Tmp_win))
+				    SetFocus (Tmp_win, Event.xcrossing.time);
+				SendTakeFocusMessage (Tmp_win, Event.xcrossing.time);
+			    } else if (Tmp_win->hilite_w)
+				/* ...no FocusIn event coming: */
+				XMapWindow (dpy, Tmp_win->hilite_w);
+
+			    Focus = Tmp_win;
+			    HighLightIconManager (Focus);
+			}
+			/*
+			 * If we are entering the application window,
+			 * install its colormap(s).
+			 */
+			InstallWindowColormaps (EnterNotify, Tmp_win);
+		    }
+		}
+		else /* ...client not mapped: */
+		{
+		    if (inicon)
+		    {
+			/* Mouse over *iconified* entry in iconmgr: */
+			if (input)
+			{
+#ifdef TWM_USE_SLOPPYFOCUS
+			    if (FocusRoot == FALSE) {
+				UnHighLightIconManager();
+				FocusOnRoot();
+			    }
+#endif
+			    if (Scr->TitleFocus == TRUE)
+				HighLightIconManager (Tmp_win);
+			    else
+				SetIconMgrEntryActive (Tmp_win->list);
+			}
+			else
+			{
+			    SetIconMgrEntryActive (Tmp_win->list);
+			}
+		    } else if (Tmp_win->wmhints != NULL
+			    && Tmp_win->wmhints->icon_window == Event.xcrossing.window)
+			InstallWindowColormaps (EnterNotify, Tmp_win);
+		}
+	    }
+
 	    /*
 	     * If this window is to be autoraised, mark it so
 	     */
 	    if (Tmp_win->auto_raise) {
 		enter_win = Tmp_win;
-		if (enter_flag == FALSE) AutoRaiseWindow (Tmp_win);
+		if (enter_flag == FALSE)
+		    AutoRaiseWindow (Tmp_win);
 	    } else if (enter_flag && raise_win == Tmp_win)
 	      enter_win = Tmp_win;
+#if 1
+	    else
+		/* iconmgr special treatment: raise now: */
+		if (inicon && Tmp_win->list->iconmgr->twm_win->auto_raise)
+		    XRaiseWindow (dpy, Tmp_win->list->iconmgr->twm_win->frame);
+#endif
+
 	    /*
 	     * set ring leader
 	     */
 	    if (Tmp_win->ring.next && (!enter_flag || raise_win == enter_win))
 	      Scr->RingLeader = Tmp_win;
-	    XSync (dpy, 0);
+
+	    XFlush (dpy);
 	    return;
 	}				/* end if Tmp_win */
     }					/* end if !ActiveMenu */
@@ -2084,12 +2393,13 @@ HandleEnterNotify()
     /*
      * Find the menu that we are dealing with now; punt if unknown
      */
-    if (XFindContext (dpy, ewp->window, MenuContext, (caddr_t *)&mr) != XCSUCCESS) return;
+    if (XFindContext (dpy, Event.xcrossing.window, MenuContext, (caddr_t *)&mr) != XCSUCCESS)
+	return;
 
     mr->entered = TRUE;
     if (ActiveMenu && mr == ActiveMenu->prev && RootFunction == 0) {
 	if (Scr->Shadow) XUnmapWindow (dpy, ActiveMenu->shadow);
-	XUnmapWindow (dpy, ActiveMenu->w);
+	XUnmapWindow (dpy, ActiveMenu->w.win);
 	ActiveMenu->mapped = UNMAPPED;
 	UninstallRootColormap ();
 	if (ActiveItem) {
@@ -2098,37 +2408,20 @@ HandleEnterNotify()
 	}
 	ActiveItem = NULL;
 	ActiveMenu = mr;
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE) {
+	    if (Scr->Shadow && Scr->XCompMgrRunning == FALSE) {
+		extern void RepaintTranslucentShadow (MenuRoot*);
+		/* trick cleanup menuwindow semitransparent shadow area */
+		XUnmapWindow (dpy, mr->shadow);
+		XSync (dpy, False);
+		XMapWindow (dpy, mr->shadow);
+		RepaintTranslucentShadow (mr);
+	    }
+	}
+#endif
 	MenuDepth--;
     }
-    return;
-}
-
-
-
-/** \fn HLNQueueScanner
- *  LeaveNotify event q scanner.
- *
- *	Looks at the queued events and determines if any
- *	EnterNotify events are behind this event to allow
- *	skipping of unnecessary processing.
- */
-
-typedef struct HLNScanArgs {
-    Window w;		/**< The window getting the LeaveNotify */
-    Bool enters;	/**< Any EnterNotify event at all */
-    Bool matches;	/**< Any matching EnterNotify events */
-} HLNScanArgs;
-
-static Bool
-HLNQueueScanner(Display *dpy, XEvent *ev, char *args)
-{
-    if (ev->type == EnterNotify && ev->xcrossing.mode != NotifyGrab) {
-	((HLNScanArgs *) args)->enters = True;
-	if (ev->xcrossing.window == ((HLNScanArgs *) args)->w)
-	    ((HLNScanArgs *) args)->matches = True;
-    }
-
-    return (False);
 }
 
 
@@ -2139,70 +2432,314 @@ HLNQueueScanner(Display *dpy, XEvent *ev, char *args)
 void
 HandleLeaveNotify()
 {
-    HLNScanArgs scanArgs;
-    XEvent dummy;
+    /*
+     * We're not interested in pseudo Enter/Leave events generated
+     * from grab initiations and terminations.
+     */
+    if (Event.xcrossing.mode != NotifyNormal || Event.xcrossing.detail == NotifyPointer)
+	return;
+
+    /*
+     * We're not interested in Leave events while going
+     * into subwindows (client 'w', 'title_w').
+     */
+    if (Event.xcrossing.detail == NotifyInferior)
+	return;
 
     if (Tmp_win != NULL)
     {
-	Bool inicon;
+	int inicon = WinIsIconMgrEntry (Event.xcrossing.window, Tmp_win);
 
-	/*
-	 * We're not interested in pseudo Enter/Leave events generated
-	 * from grab initiations and terminations.
-	 */
-	if (Event.xcrossing.mode != NotifyNormal)
-	    return;
+	if ((Event.xcrossing.window == Tmp_win->frame) || inicon)
+	    SetBorder (Tmp_win, False);
 
-	inicon = (Tmp_win->list &&
-		  Tmp_win->list->w == Event.xcrossing.window);
+	if (FocusRoot == TRUE)
+	{
+	    int input = AcceptsInput (Tmp_win);
 
-	if (Scr->RingLeader && Scr->RingLeader == Tmp_win &&
-	    (Event.xcrossing.detail != NotifyInferior &&
-	     Event.xcrossing.window != Tmp_win->w)) {
+	    if ((Event.xcrossing.window == Tmp_win->frame) || inicon)
+	    {
+		if (input)
+		{
+		    if ((Scr->TitleFocus == TRUE) || inicon)
+		    {
+			SetFocus ((TwmWindow *) NULL, Event.xcrossing.time);
+			if (Tmp_win->hilite_w && ExpectsTakeFocus(Tmp_win))
+			    XUnmapWindow (dpy, Tmp_win->hilite_w);
+			UnHighLightIconManager();
+			Focus = NULL;
+		    }
+		}
+	    }
+	    else if (Event.xcrossing.window == Tmp_win->w)
+	    {
+		if (input)
+		{
+		    if (Scr->TitleFocus == FALSE)
+		    {
+			/* Mouse leaving client window in 'PointerRoot' mode: */
+			if (ExpectsInput(Tmp_win) && ExpectsTakeFocus(Tmp_win))
+			    SetFocus ((TwmWindow *) NULL, Event.xcrossing.time);
+			else if (Tmp_win->hilite_w)
+			    /* ...no FocusOut event coming: */
+			    XUnmapWindow (dpy, Tmp_win->hilite_w);
+			UnHighLightIconManager();
+			Focus = NULL;
+		    }
+		}
+
+		InstallWindowColormaps (LeaveNotify, &Scr->TwmRoot);
+	    }
+	}
+
+	if (Scr->RingLeader && Scr->RingLeader == Tmp_win
+	    && Event.xcrossing.window == (Scr->TitleFocus == TRUE ? Tmp_win->frame : Tmp_win->w))
+	{
 	    if (!inicon) {
-		if (Tmp_win->mapped) {
-		    Tmp_win->ring.cursor_valid = False;
-		} else {
-		    Tmp_win->ring.cursor_valid = True;
-		    Tmp_win->ring.curs_x = (Event.xcrossing.x_root -
-					    Tmp_win->frame_x);
-		    Tmp_win->ring.curs_y = (Event.xcrossing.y_root -
-					    Tmp_win->frame_y);
+		/* only save mouse location if leaving from inside the client area: */
+		if (Event.xcrossing.x > 0 && Event.xcrossing.x < Tmp_win->frame_width-1
+		    && Event.xcrossing.y > 0 && Event.xcrossing.y < Tmp_win->frame_height-1)
+		{
+		    Tmp_win->ring.curs_x = Event.xcrossing.x;
+		    Tmp_win->ring.curs_y = Event.xcrossing.y;
 		}
 	    }
 	    Scr->RingLeader = (TwmWindow *) NULL;
 	}
-	if (Scr->FocusRoot) {
 
-	    if (Event.xcrossing.detail != NotifyInferior) {
+	XFlush (dpy);
+    }
+}
 
+
+
+/**
+ *	FocusChange event handler
+ */
+void
+HandleFocusChange()
+{
+    if (Event.xfocus.detail != NotifyInferior && Event.xfocus.detail != NotifyPointer)
+    {
+	if (Tmp_win == NULL)
+	{
+	    if (Event.xfocus.type == FocusIn
+		&& (Event.xfocus.detail == NotifyDetailNone || Event.xfocus.detail == NotifyPointerRoot))
+	    {
 		/*
-		 * Scan for EnterNotify events to see if we can avoid some
-		 * unnecessary processing.
+		 * Some (override_redirect or windowless?) X11-client attempts to turn off focus.
+		 * It is essential for twm to not allow this as it deactivates the keyboard (and
+		 * all twm-bound "hotkeys".
+		 * If someone sets focus to "NotifyPointerRoot", it is not that fatal and let it
+		 * be so.
+		 * Further, if some override_redirect client (or some client on some
+		 * non-twm-managed screen) hijacks focus, we cannot do anything about this.
 		 */
-		scanArgs.w = Event.xcrossing.window;
-		scanArgs.enters = scanArgs.matches = False;
-		(void) XCheckIfEvent(dpy, &dummy, HLNQueueScanner,
-				     (char *) &scanArgs);
-
-		if ((Event.xcrossing.window == Tmp_win->frame &&
-			!scanArgs.matches) || inicon) {
-		    if (Tmp_win->list) NotActiveIconManager(Tmp_win->list);
-		    if (Tmp_win->hilite_w)
-		      XUnmapWindow (dpy, Tmp_win->hilite_w);
-		    SetBorder (Tmp_win, False);
-		    if (Scr->TitleFocus ||
-			Tmp_win->protocols & DoesWmTakeFocus)
-		      SetFocus ((TwmWindow *) NULL, Event.xcrossing.time);
-		    Scr->Focus = NULL;
-		} else if (Event.xcrossing.window == Tmp_win->w &&
-				!scanArgs.enters) {
-		    InstallWindowColormaps (LeaveNotify, &Scr->TwmRoot);
+		if (Event.xfocus.detail == NotifyDetailNone)
+		    FocusOnRoot();
+		else {
+#if 1		    /* some servers are buggy (XDarwin on PPC) */
+		    XGetInputFocus (dpy, &JunkChild, &JunkX);
+		    if (JunkChild != PointerRoot)
+			return;
+#endif
+		    FocusedOnRoot();
 		}
+		UnHighLightIconManager();
 	    }
 	}
-	XSync (dpy, 0);
-	return;
+	else
+	{
+	    if (Event.xfocus.type == FocusIn)
+	    {
+		static Window thf = None;
+
+		if (Focus != Tmp_win || (FocusRoot == TRUE && Event.xfocus.window == Tmp_win->frame))
+		{
+		    int f;
+		    if (Event.xfocus.window == Tmp_win->frame)
+		    {
+			if (Event.xfocus.detail == NotifyNonlinear /* || Event.xfocus.detail == NotifyNonlinearVirtual */ || Event.xfocus.detail == NotifyAncestor)
+			{
+			    /*
+			     * Accept focus change because probably some external entity
+			     * assigned focus to the 'frame' window; simply redirect it
+			     * to the client 'w'.  Don't resist.
+			     */
+			    if (AcceptsInput (Tmp_win)) {
+				/* don't trigger FocusOut for 'frame', do trigger 'FocusIn' for 'w' */
+				XWindowAttributes a;
+				XGetWindowAttributes (dpy, Tmp_win->frame, &a);
+				XSelectInput (dpy, Tmp_win->frame, a.your_event_mask & ~FocusChangeMask);
+				SetFocus (Tmp_win, CurrentTime);
+				XSelectInput (dpy, Tmp_win->frame, a.your_event_mask);
+				if (ExpectsTakeFocus(Tmp_win))
+				    SendTakeFocusMessage (Tmp_win, lastTimestamp);
+				FocusRoot = FALSE; /* enter F_FOCUS mode */
+			    }
+			}
+			return;
+		    }
+#ifdef TWM_ENABLE_STOLENFOCUS_RECOVERY
+		    else if (GloballyActive (Tmp_win))
+		    { /* accept focus change into a ICCCM "Globally Active" client */ }
+		    else if (RecoverStolenFocusTimeout >= 0)
+		    {
+			/*
+			 * This shouldn't happen but some clients "grab" focus unexpectedly,
+			 * so update TWM's knowledge where the focus actually is.
+			 *
+			 * Accept focus transfer if it happens inside a window group
+			 * or to/from a "transient-for" window.
+			 *
+			 * Accept focus transfer too, if the mouse appears to be inside
+			 * the client grabbing the focus -- physical mouse transfer,
+			 * Enter/Leave and FocusIn/FocusOut are not always synchronised?
+			 */
+			if (Event.xfocus.mode == NotifyNormal || Event.xfocus.mode == NotifyWhileGrabbed)
+			{
+			    /* attn: we accept unexpected focus changes by NotifyGrab/NotifyUngrab */
+			    f = (Tmp_win->frame_bw << 1);
+			    if ( ((Focus == NULL) || !IS_RELATED_WIN(Focus,Tmp_win))
+#if 0				/* check if mouse is over the greedy client, obscured or visible: */
+				&&
+				(False == XQueryPointer(dpy, Tmp_win->frame, &JunkRoot, &JunkChild, &JunkX, &JunkY, &HotX, &HotY, &JunkMask)
+				    || HotX < 0 || HotX >= Tmp_win->frame_width + f || HotY < 0 || HotY >= Tmp_win->frame_height + f)
+			/*	&&
+				(Tmp_win->list == NULL || Tmp_win->list->iconmgr->twm_win->mapped == FALSE
+				|| False == XTranslateCoordinates(dpy, Tmp_win->list->iconmgr->scr->Root, Tmp_win->list->w.win, JunkX, JunkY, &HotX, &HotY, &JunkChild)
+				    || HotX < 0 || HotX >= Tmp_win->list->width || HotY < 0 || HotY >= Tmp_win->list->height) */
+#endif
+			    )
+			    {
+				auto struct timeval clk;
+				auto long stamp1;
+				static long stamp0 = 0; /* milliseconds measure */
+				static int attempts = 0;
+
+				X_GETTIMEOFDAY (&clk);
+				stamp1 = (long)(clk.tv_sec) * 1000 + (long)(clk.tv_usec) / 1000;
+
+				/* attempt to return focus: */
+				if (thf != Tmp_win->frame)
+				{
+				    thf = Tmp_win->frame;
+				    stamp0 = stamp1;
+				    attempts = 0;
+				}
+
+				if (stamp1 - stamp0 <= RecoverStolenFocusTimeout && attempts < RecoverStolenFocusAttempts)
+				{
+				    attempts++;
+
+				    if (Focus == NULL)
+				    {
+					/* PointerRoot mode */
+					SetFocus ((TwmWindow *) NULL, CurrentTime);
+				    }
+				    else
+				    {
+					/* prohibit triggering FocusIn event */
+					XWindowAttributes a;
+					XGetWindowAttributes (dpy, Focus->w, &a);
+					XSelectInput (dpy, Focus->w, a.your_event_mask & ~FocusChangeMask);
+					SetFocus (Focus, CurrentTime);
+					XSelectInput (dpy, Focus->w, a.your_event_mask);
+					if (ExpectsTakeFocus(Focus))
+					    SendTakeFocusMessage (Focus, lastTimestamp);
+					if (Focus->hilite_w)
+					    XMapWindow (dpy, Focus->hilite_w);
+				    }
+#ifdef DEBUG_STOLENFOCUS
+				    if (PrintErrorMessages)
+				    {
+					if (stamp1 != stamp0)
+					    fprintf (stderr, "HandleFocusChange(1,s=%lu,F=%x,C=%lx{%d,%d}): From '%s' (w=0x0%lx,f=%x) to '%s' (w=0x0%lx,f=%x), %d. attempt to return (%ld milliseconds later).\n",
+						Event.xfocus.serial,
+						((Scr->TitleFocus==TRUE?512:256)|(SloppyFocus==TRUE?32:16)|(FocusRoot==TRUE?2:1)),
+						(long)JunkChild, HotX, HotY,
+						(Focus?Focus->name:"NULL"),
+						(long)(Focus?Focus->w:None),
+						(Focus?(((Focus->protocols&DoesWmTakeFocus)?32:16)|((!Focus->wmhints||Focus->wmhints->input)?2:1)):0),
+						Tmp_win->name, (long)(Tmp_win->w),
+						(Tmp_win?(((Tmp_win->protocols&DoesWmTakeFocus)?32:16)|((!Tmp_win->wmhints||Tmp_win->wmhints->input)?2:1)):0),
+						attempts, (stamp1-stamp0));
+#if 1
+					else
+					    fprintf (stderr, "HandleFocusChange(0,s=%lu,F=%x,C=%lx{%d,%d}): From '%s' (w=0x0%lx,f=%x) to '%s' (w=0x0%lx,f=%x), attempting to return.\n",
+						Event.xfocus.serial,
+						((Scr->TitleFocus==TRUE?512:256)|(SloppyFocus==TRUE?32:16)|(FocusRoot==TRUE?2:1)),
+						(long)JunkChild, HotX, HotY,
+						(Focus?Focus->name:"NULL"),
+						(long)(Focus?Focus->w:None),
+						(Focus?(((Focus->protocols&DoesWmTakeFocus)?32:16)|((!Focus->wmhints||Focus->wmhints->input)?2:1)):0),
+						Tmp_win->name, (long)(Tmp_win->w),
+						(Tmp_win?(((Tmp_win->protocols&DoesWmTakeFocus)?32:16)|((!Tmp_win->wmhints||Tmp_win->wmhints->input)?2:1)):0));
+#endif
+				    }
+#endif
+				    return;
+				}
+				/* focus recovery time expired or attempts exhausted; give up, let focus go */
+#if 1
+				if (PrintErrorMessages)
+				{
+				    int x, y;
+				    InfoLines = 0;
+				    (void) sprintf(Info[InfoLines++], "Lost focus alert:");
+				    if (Focus) {
+					(void) sprintf(Info[InfoLines++], "Focus hijacked by '%s'.", Tmp_win->name);
+					if (Focus->mapped) {
+					    x = Focus->frame_x + Focus->frame_width/2;
+					    y = Focus->frame_y;
+					} else
+					    x = y = 0;
+				    } else {
+					if (Tmp_win->mapped) {
+					    (void) sprintf(Info[InfoLines++], "Focus hijacked here.", Tmp_win->name);
+					    x = Tmp_win->frame_x + Tmp_win->frame_width/2;
+					    y = Tmp_win->frame_y;
+					} else {
+					    (void) sprintf(Info[InfoLines++], "Focus hijacked by '%s'.", Tmp_win->name);
+					    x = y = 0;
+					}
+				    }
+				    RaiseInfoWindow (x, y);
+				}
+#endif
+#ifdef DEBUG_STOLENFOCUS
+				if (PrintErrorMessages)
+				    fprintf (stderr, "HandleFocusChange(2,s=%lu,F=%x): From '%s' (w=0x0%lx,f=%x) to '%s' (w=0x0%lx,f=%x), giving away (%ld milliseconds later).\n",
+					Event.xfocus.serial,
+					((Scr->TitleFocus==TRUE?512:256)|(SloppyFocus==TRUE?32:16)|(FocusRoot==TRUE?2:1)),
+					(Focus?Focus->name:"NULL"),
+					(long)(Focus?Focus->w:None),
+					(Focus?(((Focus->protocols&DoesWmTakeFocus)?32:16)|((!Focus->wmhints||Focus->wmhints->input)?2:1)):0),
+					Tmp_win->name, (long)(Tmp_win->w),
+					(Tmp_win?(((Tmp_win->protocols&DoesWmTakeFocus)?32:16)|((!Tmp_win->wmhints||Tmp_win->wmhints->input)?2:1)):0),
+					(stamp1-stamp0));
+#endif
+			    }
+			} /* NotifyNormal */
+		    } /* RecoverStolenFocusTimeout >= 0 */
+#endif
+		    f = FocusRoot;
+		    FocusedOnClient (Tmp_win); /*only decorate etc, preserve focus state variable*/
+		    FocusRoot = f;
+		    HighLightIconManager (Tmp_win);
+		} /* Focus != Tmp_win */
+
+		if (Tmp_win->hilite_w /* (remember: server delivered FocusIn!) && AcceptsInput (Tmp_win) */)
+		    XMapWindow (dpy, Tmp_win->hilite_w);
+
+		thf = None;
+	    }
+	    else /* FocusOut */
+	    {
+		if (Tmp_win->hilite_w)
+		    XUnmapWindow (dpy, Tmp_win->hilite_w);
+	    }
+	} /* Tmp_win ?= NULL */
     }
 }
 
@@ -2221,7 +2758,7 @@ HandleConfigureRequest()
     XConfigureRequestEvent *cre = &Event.xconfigurerequest;
 
 #ifdef DEBUG_EVENTS
-    fprintf(stderr, "ConfigureRequest\n");
+    fprintf(stderr, "events.c -- HandleConfigureRequest(): win=0x%08lx\n", (long)(cre->window));
     if (cre->value_mask & CWX)
 	fprintf(stderr, "  x = %d\n", cre->x);
     if (cre->value_mask & CWY)
@@ -2230,6 +2767,8 @@ HandleConfigureRequest()
 	fprintf(stderr, "  width = %d\n", cre->width);
     if (cre->value_mask & CWHeight)
 	fprintf(stderr, "  height = %d\n", cre->height);
+    if (cre->value_mask & CWBorderWidth)
+	fprintf(stderr, "  border = %d\n", cre->border_width);
     if (cre->value_mask & CWSibling)
 	fprintf(stderr, "  above = 0x%x\n", cre->above);
     if (cre->value_mask & CWStackMode)
@@ -2241,9 +2780,15 @@ HandleConfigureRequest()
      * be wrong
      */
     Event.xany.window = cre->window;	/* mash parent field */
-    if (XFindContext (dpy, cre->window, TwmContext, (caddr_t *) &Tmp_win) ==
-	XCNOENT)
-      Tmp_win = NULL;
+    if (XFindContext (dpy, cre->window, TwmContext, (caddr_t *) &Tmp_win) == XCNOENT)
+	Tmp_win = NULL;
+    else if ((Tmp_win->iconmgr == TRUE) || (Tmp_win->icon_w.win == cre->window)) {
+	/* prohibit moving iconmgr and icon windows completely off X11-screen */
+	if ((cre->x + (cre->width + (cre->border_width<<1)) <= 0) || (cre->x >= Scr->MyDisplayWidth))
+	    cre->value_mask &= ~CWX;
+	if ((cre->y + (cre->height + (cre->border_width<<1)) <= 0) || (cre->y >= Scr->MyDisplayHeight))
+	    cre->value_mask &= ~CWY;
+    }
 
 
     /*
@@ -2252,8 +2797,8 @@ HandleConfigureRequest()
      * Instead, we'll read the current geometry.  Therefore, we should respond
      * to configuration requests for windows which have never been mapped.
      */
-    if (!Tmp_win || Tmp_win->icon_w == cre->window) {
-	xwcm = cre->value_mask & 
+    if (!Tmp_win || Tmp_win->icon_w.win == cre->window) {
+	xwcm = cre->value_mask &
 	    (CWX | CWY | CWWidth | CWHeight | CWBorderWidth);
 	xwc.x = cre->x;
 	xwc.y = cre->y;
@@ -2298,7 +2843,7 @@ HandleConfigureRequest()
 
     if (cre->value_mask & CWBorderWidth) {
 	int bwdelta = cre->border_width - Tmp_win->old_bw;  /* posit growth */
-	if (bwdelta && Scr->ClientBorderWidth) {  /* if change allowed */
+	if (bwdelta && Tmp_win->ClientBorderWidth) {  /* if change allowed */
 	    x += gravx * bwdelta;	/* change default values only */
 	    y += gravy * bwdelta;	/* ditto */
 	    bw = cre->border_width;
@@ -2310,17 +2855,26 @@ HandleConfigureRequest()
     }
 
     if (cre->value_mask & CWX) {	/* override even if border change */
-	x = cre->x - bw;
+	if (cre->window == Tmp_win->frame)
+	    x = cre->x; /* some external entity reconfigured the frame, let be so */
+	else
+	    x = cre->x - bw;
     }
     if (cre->value_mask & CWY) {
-	y = cre->y - ((gravy < 0) ? 0 : Tmp_win->title_height) - bw;
+	if (cre->window == Tmp_win->frame)
+	    y = cre->y;
+	else
+	    y = cre->y - ((gravy < 0) ? 0 : Tmp_win->title_height) - bw;
     }
 
     if (cre->value_mask & CWWidth) {
 	width = cre->width;
     }
     if (cre->value_mask & CWHeight) {
-	height = cre->height + Tmp_win->title_height;
+	if (cre->window == Tmp_win->frame)
+	    height = cre->height;
+	else
+	    height = cre->height + Tmp_win->title_height;
     }
 
     if (width != Tmp_win->frame_width || height != Tmp_win->frame_height)
@@ -2333,7 +2887,17 @@ HandleConfigureRequest()
      * requested client window width; the inner height is the same as the
      * requested client window height plus any title bar slop.
      */
-    SetupWindow (Tmp_win, x, y, width, height, bw);
+    if (cre->window == Tmp_win->frame) {
+	if (cre->value_mask & (CWWidth | CWHeight))
+	    ConstrainSize (Tmp_win, &width, &height);
+	SetupFrame (Tmp_win, x, y, width, height, bw, True);
+	if (Tmp_win->iconmgr) {
+	    Tmp_win->iconmgrp->width = width;
+	    PackIconManager (Tmp_win->iconmgrp);
+	}
+    }
+    else
+	SetupWindow (Tmp_win, x, y, width, height, bw);
 }
 
 
@@ -2361,13 +2925,90 @@ HandleShapeNotify ()
 
 
 /**
+ * root-window configuration change notification event handler
+ */
+#if defined TWM_USE_XINERAMA || defined TWM_USE_XRANDR
+static void RootChangeNotify (int width, int height)
+{
+    if (Scr->RRScreenChangeRestart == TRUE
+	    || (Scr->RRScreenSizeChangeRestart == TRUE
+		&& (Scr->MyDisplayWidth != width || Scr->MyDisplayHeight != height)))
+    {
+	/* prepare a faked button event: */
+	XEvent e = Event;
+	e.xbutton.type = ButtonPress;
+	e.xbutton.button = Button1;
+	e.xbutton.time = CurrentTime;
+
+	/* initiate "f.restart": */
+	ExecuteFunction (F_RESTART, NULLSTR, Scr->Root, NULL, &e, C_ROOT, FALSE);
+    }
+    else
+    {
+	/* Scr->MyDisplayWidth, Scr->MyDisplayHeight must be updated: */
+	Scr->MyDisplayWidth = width;
+	Scr->MyDisplayHeight = height;
+	Scr->use_panels = FALSE;
+#ifdef TWM_USE_XRANDR
+	if (HasXrandr == True) {
+	    if (GetXrandrTilesGeometries (Scr) == TRUE)
+		Scr->use_panels = ComputeTiledAreaBoundingBox (Scr);
+	}
+#ifdef TWM_USE_XINERAMA
+	else /*fallthrough*/
+#endif
+#endif
+#ifdef TWM_USE_XINERAMA
+	if (HasXinerama == True) {
+	    if (GetXineramaTilesGeometries (Scr) == TRUE)
+		Scr->use_panels = ComputeTiledAreaBoundingBox (Scr);
+	}
+#endif
+    }
+}
+#endif
+
+#ifdef TWM_USE_XINERAMA
+void
+HandleConfigureNotify ()
+{
+    if (Event.xconfigure.window == Scr->Root) {
+#ifdef TWM_USE_XRANDR
+	XRRUpdateConfiguration (&Event);
+#endif
+	RootChangeNotify (Event.xconfigure.width, Event.xconfigure.height);
+    }
+}
+#endif
+
+#ifdef TWM_USE_XRANDR
+/**
+ * XRANDR screen change notification event handler
+ */
+void
+HandleXrandrScreenChangeNotify ()
+{
+    XEvent e = Event;
+    /* drop any further RR-events for other panels (one is enough): */
+    while (XCheckTypedWindowEvent(dpy, Scr->Root, XrandrEventBase+RRScreenChangeNotify, &e) == True)
+	continue;
+    if (XRRUpdateConfiguration (&e) != 1)
+	fprintf (stderr, "%s: HandleXrandrScreenChangeNotify(): Not understanding Xrandr-event type = %d\n",
+		ProgramName, e.xany.type);
+    RootChangeNotify (XDisplayWidth(dpy, Scr->screen), XDisplayHeight(dpy, Scr->screen));
+}
+#endif
+
+
+
+/**
  * unknown event handler
  */
 void
 HandleUnknown()
 {
 #ifdef DEBUG_EVENTS
-    fprintf(stderr, "type = %d\n", Event.type);
+    fprintf(stderr, "events.c -- HandleUnknown(): type = %d\n", Event.type);
 #endif
 }
 
@@ -2384,7 +3025,7 @@ HandleUnknown()
 int
 Transient(Window w, Window *propw)
 {
-    return (XGetTransientForHint(dpy, w, propw));
+    return (XGetTransientForHint(dpy, w, propw) ? TRUE : FALSE);
 }
 
 
@@ -2396,22 +3037,54 @@ Transient(Window w, Window *propw)
  *  \param  w the window
  */
 ScreenInfo *
-FindScreenInfo(w)
-    Window w;
+FindPointerScreenInfo (void)
 {
-    XWindowAttributes attr;
     int scrnum;
 
-    attr.screen = NULL;
-    if (XGetWindowAttributes(dpy, w, &attr)) {
-	for (scrnum = 0; scrnum < NumScreens; scrnum++) {
-	    if (ScreenList[scrnum] != NULL &&
-		(ScreenOfDisplay(dpy, ScreenList[scrnum]->screen) ==
-		 attr.screen))
-	      return ScreenList[scrnum];
-	}
+    XQueryPointer (dpy, /*dummy*/DefaultRootWindow(dpy), &JunkRoot, &JunkChild,
+		    &JunkX, &JunkY, &HotX, &HotY, &JunkMask);
+    for (scrnum = 0; scrnum < NumScreens; scrnum++) {
+	if (ScreenList[scrnum] != NULL && ScreenList[scrnum]->Root == JunkRoot)
+	    return ScreenList[scrnum];
     }
+    return NULL;
+}
 
+ScreenInfo *
+FindDrawableScreenInfo (Drawable d)
+{
+    if (d != None && XGetGeometry(dpy, d, &JunkRoot, &JunkX, &JunkY, &JunkWidth, &JunkHeight,
+			&JunkBW, &JunkDepth)) {
+	int scrnum;
+	for (scrnum = 0; scrnum < NumScreens; scrnum++)
+	    if (ScreenList[scrnum] != NULL && ScreenList[scrnum]->Root == JunkRoot)
+		return ScreenList[scrnum];
+    }
+    return NULL;
+}
+
+ScreenInfo *
+FindWindowScreenInfo (XWindowAttributes *attr)
+{
+    int scrnum;
+
+    for (scrnum = 0; scrnum < NumScreens; scrnum++) {
+	if (ScreenList[scrnum] != NULL
+		&& ScreenOfDisplay(dpy, ScreenList[scrnum]->screen) == attr->screen)
+	    return ScreenList[scrnum];
+    }
+    return NULL;
+}
+
+ScreenInfo *
+FindScreenInfo (Window w)
+{
+    XWindowAttributes attr;
+
+    attr.screen = NULL;
+    if (w != None && XGetWindowAttributes(dpy, w, &attr)) {
+	return FindWindowScreenInfo (&attr);
+    }
     return NULL;
 }
 
@@ -2459,7 +3132,7 @@ InstallWindowColormaps (int type, TwmWindow *tmp)
 	    return;
 	/* Don't reload the currend window colormap list.
 	 */
-	if (Scr->cmapInfo.cmaps == &tmp->cmaps)
+	if (Scr->cmapInfo.cmaps == &tmp->cmaps && (tmp != &Scr->TwmRoot || Scr->TwmRoot.cmaps.number_cwins == 1))
 	    return;
 	if (Scr->cmapInfo.cmaps)
 	    for (i = Scr->cmapInfo.cmaps->number_cwins,
@@ -2553,7 +3226,22 @@ InstallRootColormap()
 	 * not that of the root window.
 	 */
 	tmp = Scr->cmapInfo.pushed_window;
-	InstallWindowColormaps(0, &Scr->TwmRoot);
+#if 1
+	if (Scr->TwmRoot.cmaps.number_cwins > 1 && ActiveMenu != NULL)
+	{
+	    /* load twm colormap only if dealing with menus, not on resize/move: */
+	    int i = Scr->TwmRoot.cmaps.number_cwins-1;
+	    ColormapWindow *cwins = Scr->TwmRoot.cmaps.cwins[0];
+	    /* bump screen/twm colormap: */
+	    Scr->TwmRoot.cmaps.cwins[0] = Scr->TwmRoot.cmaps.cwins[i];  Scr->TwmRoot.cmaps.cwins[i] = cwins;
+	    Scr->TwmRoot.cmaps.cwins[0]->colormap->state = Scr->TwmRoot.cmaps.cwins[i]->colormap->state = 0;
+	    InstallWindowColormaps (EnterNotify, &Scr->TwmRoot);
+	    /* unbump screen/twm colormap: */
+	    Scr->TwmRoot.cmaps.cwins[i] = Scr->TwmRoot.cmaps.cwins[0];  Scr->TwmRoot.cmaps.cwins[0] = cwins;
+	}
+	else
+#endif
+	    InstallWindowColormaps(0, &Scr->TwmRoot);
 	Scr->cmapInfo.pushed_window = tmp;
     }
     Scr->cmapInfo.root_pushes++;
@@ -2601,7 +3289,7 @@ UninstallRootColormap()
     }
 }
 
-#ifdef TRACE
+#if defined DEBUG_EVENTS
 void
 dumpevent (XEvent *e)
 {
@@ -2643,11 +3331,19 @@ dumpevent (XEvent *e)
       case MappingNotify:  name = "MappingNotify"; break;
     }
 
+    if (HasShape && e->type == (ShapeEventBase+ShapeNotify))
+	name = "ShapeNotify";
+
+#ifdef TWM_USE_XRANDR
+    if (HasXrandr && e->type == (XrandrEventBase+RRScreenChangeNotify))
+	name = "RRScreenChangeNotify";
+#endif
+
     if (name) {
-	printf ("event:  %s, %d remaining\n", name, QLength(dpy));
+	fprintf (stderr, "event:  %s, %d remaining\n", name, QLength(dpy));
     } else {
-	printf ("unknown event %d, %d remaining\n", e->type, QLength(dpy));
+	fprintf (stderr, "unknown event %d, %d remaining\n", e->type, QLength(dpy));
     }
 }
-#endif /* TRACE */
+#endif /* DEBUG_EVENTS */
 

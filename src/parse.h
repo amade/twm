@@ -137,6 +137,10 @@ extern int mods;
 #define F_CUTFILE		43
 #define F_SHOWLIST		44
 #define F_HIDELIST		45
+#ifdef TWM_USE_SLOPPYFOCUS
+#define F_SLOPPYFOCUS		46
+#endif
+#define F_MAXIMIZE		47
 
 #define F_MENU			101	/* string */
 #define F_WARPNEXT		112	/* string */
@@ -152,6 +156,30 @@ extern int mods;
 #define F_COLORMAP		110	/* string */
 #define F_PRIORITY		111	/* string */
 #define F_STARTWM		114	/* string */
+
+/*
+ * Attention: the following panel-zoom functions should have their numeric codes
+ * greater than the corresponding non-panel variants above, F_MAXIMIZE being the
+ * 'threshold'. See also fullzoom().
+ */
+#define F_PANELZOOM		115	/* f.panelzoom "geom@#" (panel #, "0"-full, "."-current) */
+#define F_PANELLEFTZOOM		116	/* geom := "left" */
+#define F_PANELRIGHTZOOM	117
+#define F_PANELTOPZOOM		118
+#define F_PANELBOTTOMZOOM	119	/*  -"-           */
+#define F_PANELHORIZOOM		120
+#define F_PANELFULLZOOM		121
+#define F_PANELMAXIMIZE		122
+#define F_PANELGEOMETRYZOOM	123	/* geom := "WxH+X+Y" */
+
+#define F_PANELMOVE		124	/* f.panelmove "geom@#" */
+#define F_PANELLEFTMOVE		125
+#define F_PANELRIGHTMOVE	126
+#define F_PANELTOPMOVE		127
+#define F_PANELBOTTOMMOVE	128
+#define F_PANELGEOMETRYMOVE	129
+
+#define F_SWAPICONMGRENTRY	130	/* string */
 
 #define D_NORTH			1
 #define D_SOUTH			2

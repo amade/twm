@@ -163,7 +163,6 @@ int ParseTwmrc (char *filename)
 {
     int i;
     char *home = NULL;
-    int homelen = 0;
     char *cp = NULL;
     char tmpfilename[257];
 
@@ -179,12 +178,10 @@ int ParseTwmrc (char *filename)
 
 	  case 1:			/* ~/.twmrc.screennum */
 	    if (!filename) {
-		home = getenv ("HOME");
+		(void) sprintf (tmpfilename, "~/.twmrc.%d", Scr->screen);
+		home = ExpandFilename (tmpfilename);
 		if (home) {
-		    homelen = strlen (home);
-		    cp = tmpfilename;
-		    (void) sprintf (tmpfilename, "%s/.twmrc.%d",
-				    home, Scr->screen);
+		    cp = home;
 		    break;
 		}
 	    }
@@ -192,7 +189,7 @@ int ParseTwmrc (char *filename)
 
 	  case 2:			/* ~/.twmrc */
 	    if (home) {
-		tmpfilename[homelen + 7] = '\0';
+		home[HomeLen + 7] = '\0';
 	    }
 	    break;
 
@@ -328,14 +325,31 @@ typedef struct _TwmKeyword {
 #define kw0_NoBackingStore		15
 #define kw0_NoSaveUnders		16
 #define kw0_RestartPreviousState	17
-#define kw0_ClientBorderWidth		18
+/*#define kw0_ClientBorderWidth		18*/
 #define kw0_NoTitleFocus		19
-#define kw0_RandomPlacement		20
-#define kw0_DecorateTransients		21
-#define kw0_ShowIconManager		22
+/*#define kw0_RandomPlacement		20*/
+/*#define kw0_DecorateTransients	21*/
+/*#define kw0_ShowIconManager		22*/
 #define kw0_NoCaseSensitive		23
 #define kw0_NoRaiseOnWarp		24
 #define kw0_WarpUnmapped		25
+#ifdef TWM_USE_XFT
+#define kw0_EnableXftFontRenderer	26
+#endif
+#ifdef TWM_USE_SLOPPYFOCUS
+#define kw0_SloppyFocus			27
+#endif
+#define kw0_ShowXUrgencyHints		28
+#ifdef TWM_USE_XRANDR
+#define kw0_RestartOnScreenChangeNotify		29
+#define kw0_RestartOnScreenSizeChangeNotify	30
+#endif
+#define kw0_RoundedTitle		31
+#define kw0_ShapedIconPixmaps		32
+#define kw0_FilledIconMgrHighlight	33
+#ifdef TWM_USE_RENDER
+#define kw0_EnableXrenderTransparency	34
+#endif
 
 #define kws_UsePPosition		1
 #define kws_IconFont			2
@@ -346,6 +360,8 @@ typedef struct _TwmKeyword {
 #define kws_UnknownIcon			7
 #define kws_IconDirectory		8
 #define kws_MaxWindowSize		9
+#define kws_MenuTitleFont		10
+#define kws_DefaultFont			11
 
 #define kwn_ConstrainedMoveTime		1
 #define kwn_MoveDelta			2
@@ -358,6 +374,13 @@ typedef struct _TwmKeyword {
 #define kwn_TitleButtonBorderWidth	9
 #define kwn_Priority			10
 #define kwn_MenuBorderWidth		11
+#define kwn_RecoverStolenFocus		12
+#ifdef TWM_USE_OPACITY
+#define kwn_MenuOpacity			13
+#define kwn_IconOpacity			14
+#define kwn_IconMgrOpacity		15
+#define kwn_InfoOpacity			16
+#endif
 
 #define kwcl_BorderColor		1
 #define kwcl_IconManagerHighlight	2
@@ -370,6 +393,11 @@ typedef struct _TwmKeyword {
 #define kwcl_IconBorderColor		9
 #define kwcl_IconManagerForeground	10
 #define kwcl_IconManagerBackground	11
+#define kwcl_TitleButtonForeground	12
+#define kwcl_TitleButtonBackground	13
+#define kwcl_TitleHighlightForeground	14
+#define kwcl_TitleHighlightBackground	15
+#define kwcl_IconBitmapColor		16
 
 #define kwc_DefaultForeground		1
 #define kwc_DefaultBackground		2
@@ -393,6 +421,7 @@ static TwmKeyword keytable[] = {
     { "autoraise",		AUTO_RAISE, 0 },
     { "autorelativeresize",	KEYWORD, kw0_AutoRelativeResize },
     { "bordercolor",		CLKEYWORD, kwcl_BorderColor },
+    { "bordertile",		BORDER_PIXMAP, 0 },
     { "bordertilebackground",	CLKEYWORD, kwcl_BorderTileBackground },
     { "bordertileforeground",	CLKEYWORD, kwcl_BorderTileForeground },
     { "borderwidth",		NKEYWORD, kwn_BorderWidth },
@@ -400,13 +429,14 @@ static TwmKeyword keytable[] = {
     { "buttonindent",		NKEYWORD, kwn_ButtonIndent },
     { "c",			CONTROL, 0 },
     { "center",			JKEYWORD, J_CENTER },
-    { "clientborderwidth",	KEYWORD, kw0_ClientBorderWidth },
+    { "clientborderwidth",	CLIENT_BORDERWIDTH, 0 /*KEYWORD, kw0_ClientBorderWidth*/ },
     { "color",			COLOR, 0 },
     { "constrainedmovetime",	NKEYWORD, kwn_ConstrainedMoveTime },
     { "control",		CONTROL, 0 },
     { "cursors",		CURSORS, 0 },
-    { "decoratetransients",	KEYWORD, kw0_DecorateTransients },
+    { "decoratetransients",	DECORATE_TRANSIENTS, 0 /*KEYWORD, kw0_DecorateTransients*/ },
     { "defaultbackground",	CKEYWORD, kwc_DefaultBackground },
+    { "defaultfont",		SKEYWORD, kws_DefaultFont },
     { "defaultforeground",	CKEYWORD, kwc_DefaultForeground },
     { "defaultfunction",	DEFAULT_FUNCTION, 0 },
     { "destroy",		KILL, 0 },
@@ -414,6 +444,12 @@ static TwmKeyword keytable[] = {
     { "dontmoveoff",		KEYWORD, kw0_DontMoveOff },
     { "dontsqueezetitle",	DONT_SQUEEZE_TITLE, 0 },
     { "east",			DKEYWORD, D_EAST },
+#ifdef TWM_USE_XFT
+    { "enablexftfontrenderer",	KEYWORD, kw0_EnableXftFontRenderer },
+#endif
+#ifdef TWM_USE_RENDER
+    { "enablexrendertransparency", KEYWORD, kw0_EnableXrenderTransparency },
+#endif
     { "f",			FRAME, 0 },
     { "f.autoraise",		FKEYWORD, F_AUTORAISE },
     { "f.backiconmgr",		FKEYWORD, F_BACKICONMGR },
@@ -446,10 +482,13 @@ static TwmKeyword keytable[] = {
     { "f.lefticonmgr",		FKEYWORD, F_LEFTICONMGR },
     { "f.leftzoom",		FKEYWORD, F_LEFTZOOM },
     { "f.lower",		FKEYWORD, F_LOWER },
+    { "f.maximize",		FKEYWORD, F_MAXIMIZE },
     { "f.menu",			FSKEYWORD, F_MENU },
     { "f.move",			FKEYWORD, F_MOVE },
     { "f.nexticonmgr",		FKEYWORD, F_NEXTICONMGR },
     { "f.nop",			FKEYWORD, F_NOP },
+    { "f.panelmove",		FSKEYWORD, F_PANELMOVE},
+    { "f.panelzoom",		FSKEYWORD, F_PANELZOOM},
     { "f.previconmgr",		FKEYWORD, F_PREVICONMGR },
     { "f.priority",		FSKEYWORD, F_PRIORITY },
     { "f.quit",			FKEYWORD, F_QUIT },
@@ -462,9 +501,13 @@ static TwmKeyword keytable[] = {
     { "f.rightzoom",		FKEYWORD, F_RIGHTZOOM },
     { "f.saveyourself",		FKEYWORD, F_SAVEYOURSELF },
     { "f.showiconmgr",		FKEYWORD, F_SHOWLIST },
+#ifdef TWM_USE_SLOPPYFOCUS
+    { "f.sloppyfocus",		FKEYWORD, F_SLOPPYFOCUS },
+#endif
     { "f.sorticonmgr",		FKEYWORD, F_SORTICONMGR },
     { "f.source",		FSKEYWORD, F_BEEP },  /* XXX - don't work */
     { "f.startwm",		FSKEYWORD, F_STARTWM },
+    { "f.swapiconmgrentry",		FSKEYWORD, F_SWAPICONMGRENTRY },
     { "f.title",		FKEYWORD, F_TITLE },
     { "f.topzoom",		FKEYWORD, F_TOPZOOM },
     { "f.twmrc",		FKEYWORD, F_RESTART },
@@ -481,6 +524,7 @@ static TwmKeyword keytable[] = {
     { "f.warptoscreen",		FSKEYWORD, F_WARPTOSCREEN },
     { "f.winrefresh",		FKEYWORD, F_WINREFRESH },
     { "f.zoom",			FKEYWORD, F_ZOOM },
+    { "fillediconmanagerhighlight",	KEYWORD, kw0_FilledIconMgrHighlight },
     { "forceicons",		KEYWORD, kw0_ForceIcons },
     { "frame",			FRAME, 0 },
     { "framepadding",		NKEYWORD, kwn_FramePadding },
@@ -490,6 +534,7 @@ static TwmKeyword keytable[] = {
     { "i",			ICON, 0 },
     { "icon",			ICON, 0 },
     { "iconbackground",		CLKEYWORD, kwcl_IconBackground },
+    { "iconbitmapcolor",	CLKEYWORD, kwcl_IconBitmapColor },
     { "iconbordercolor",	CLKEYWORD, kwcl_IconBorderColor },
     { "iconborderwidth",	NKEYWORD, kwn_IconBorderWidth },
     { "icondirectory",		SKEYWORD, kws_IconDirectory },
@@ -502,11 +547,20 @@ static TwmKeyword keytable[] = {
     { "iconmanagerforeground",	CLKEYWORD, kwcl_IconManagerForeground },
     { "iconmanagergeometry",	ICONMGR_GEOMETRY, 0 },
     { "iconmanagerhighlight",	CLKEYWORD, kwcl_IconManagerHighlight },
+#ifdef TWM_USE_OPACITY
+    { "iconmanageropacity",		NKEYWORD, kwn_IconMgrOpacity },
+#endif
     { "iconmanagers",		ICONMGRS, 0 },
     { "iconmanagershow",	ICONMGR_SHOW, 0 },
     { "iconmgr",		ICONMGR, 0 },
+#ifdef TWM_USE_OPACITY
+    { "iconopacity",		NKEYWORD, kwn_IconOpacity },
+#endif
     { "iconregion",		ICON_REGION, 0 },
     { "icons",			ICONS, 0 },
+#ifdef TWM_USE_OPACITY
+    { "infoopacity",		NKEYWORD, kwn_InfoOpacity },
+#endif
     { "interpolatemenucolors",	KEYWORD, kw0_InterpolateMenuColors },
     { "l",			LOCK, 0 },
     { "left",			JKEYWORD, J_LEFT },
@@ -521,8 +575,12 @@ static TwmKeyword keytable[] = {
     { "menuborderwidth",	NKEYWORD, kwn_MenuBorderWidth },
     { "menufont",		SKEYWORD, kws_MenuFont },
     { "menuforeground",		CKEYWORD, kwc_MenuForeground },
+#ifdef TWM_USE_OPACITY
+    { "menuopacity",		NKEYWORD, kwn_MenuOpacity },
+#endif
     { "menushadowcolor",	CKEYWORD, kwc_MenuShadowColor },
     { "menutitlebackground",	CKEYWORD, kwc_MenuTitleBackground },
+    { "menutitlefont",		SKEYWORD, kws_MenuTitleFont },
     { "menutitleforeground",	CKEYWORD, kwc_MenuTitleForeground },
     { "meta",			META, 0 },
     { "mod",			META, 0 },  /* fake it */
@@ -531,6 +589,8 @@ static TwmKeyword keytable[] = {
     { "movedelta",		NKEYWORD, kwn_MoveDelta },
     { "nobackingstore",		KEYWORD, kw0_NoBackingStore },
     { "nocasesensitive",	KEYWORD, kw0_NoCaseSensitive },
+    { "noclientborderwidth",	NO_CLIENT_BORDERWIDTH, 0},
+    { "nodecoratetransients",	NO_DECORATE_TRANSIENTS, 0 },
     { "nodefaults",		KEYWORD, kw0_NoDefaults },
     { "nograbserver",		KEYWORD, kw0_NoGrabServer },
     { "nohighlight",		NO_HILITE, 0 },
@@ -540,6 +600,7 @@ static TwmKeyword keytable[] = {
     { "noraiseonmove",		KEYWORD, kw0_NoRaiseOnMove },
     { "noraiseonresize",	KEYWORD, kw0_NoRaiseOnResize },
     { "noraiseonwarp",		KEYWORD, kw0_NoRaiseOnWarp },
+    { "norandomplacement",	NO_RANDOM_PLACEMENT, 0 },
     { "north",			DKEYWORD, D_NORTH },
     { "nosaveunders",		KEYWORD, kw0_NoSaveUnders },
     { "nostackmode",		NO_STACKMODE, 0 },
@@ -547,24 +608,39 @@ static TwmKeyword keytable[] = {
     { "notitlefocus",		KEYWORD, kw0_NoTitleFocus },
     { "notitlehighlight",	NO_TITLE_HILITE, 0 },
     { "noversion",		KEYWORD, kw0_NoVersion },
+    { "nowarpcursor",		NO_WARP_CURSOR, 0 },
+    { "nowindowring",		NO_WINDOW_RING, 0 },
     { "opaquemove",		KEYWORD, kw0_OpaqueMove },
     { "pixmaps",		PIXMAPS, 0 },
     { "pointerbackground",	CKEYWORD, kwc_PointerBackground },
     { "pointerforeground",	CKEYWORD, kwc_PointerForeground },
     { "priority",		NKEYWORD, kwn_Priority },
     { "r",			ROOT, 0 },
-    { "randomplacement",	KEYWORD, kw0_RandomPlacement },
+    { "randomplacement",	RANDOM_PLACEMENT, 0 /*KEYWORD, kw0_RandomPlacement*/ },
+    { "recoverstolenfocus",	NKEYWORD, kwn_RecoverStolenFocus },
     { "resize",			RESIZE, 0 },
     { "resizefont",		SKEYWORD, kws_ResizeFont },
+#ifdef TWM_USE_XRANDR
+    { "restartonscreenchangenotify", KEYWORD, kw0_RestartOnScreenChangeNotify },
+    { "restartonscreensizechangenotify", KEYWORD, kw0_RestartOnScreenSizeChangeNotify },
+#endif
     { "restartpreviousstate",	KEYWORD, kw0_RestartPreviousState },
     { "right",			JKEYWORD, J_RIGHT },
     { "righttitlebutton",	RIGHT_TITLEBUTTON, 0 },
     { "root",			ROOT, 0 },
+    { "roundedtitle",		KEYWORD, kw0_RoundedTitle },
     { "s",			SHIFT, 0 },
     { "savecolor",              SAVECOLOR, 0},
     { "select",			SELECT, 0 },
+    { "shapediconlabels",	SHAPED_ICON_LABELS, 0},
+    { "shapediconmanagerlabels",	SHAPED_ICONMGR_LABELS, 0},
+    { "shapediconpixmaps",	KEYWORD, kw0_ShapedIconPixmaps },
     { "shift",			SHIFT, 0 },
-    { "showiconmanager",	KEYWORD, kw0_ShowIconManager },
+    { "showiconmanager",	SHOW_ICONMANAGER, 0 /*KEYWORD, kw0_ShowIconManager*/ },
+    { "showxurgencyhints",	KEYWORD, kw0_ShowXUrgencyHints },
+#ifdef TWM_USE_SLOPPYFOCUS
+    { "sloppyfocus",		KEYWORD, kw0_SloppyFocus },
+#endif
     { "sorticonmanager",	KEYWORD, kw0_SortIconManager },
     { "south",			DKEYWORD, D_SOUTH },
     { "squeezetitle",		SQUEEZE_TITLE, 0 },
@@ -572,10 +648,14 @@ static TwmKeyword keytable[] = {
     { "t",			TITLE, 0 },
     { "title",			TITLE, 0 },
     { "titlebackground",	CLKEYWORD, kwcl_TitleBackground },
+    { "titlebuttonbackground",	CLKEYWORD, kwcl_TitleButtonBackground },
     { "titlebuttonborderwidth",	NKEYWORD, kwn_TitleButtonBorderWidth },
+    { "titlebuttonforeground",	CLKEYWORD, kwcl_TitleButtonForeground },
     { "titlefont",		SKEYWORD, kws_TitleFont },
     { "titleforeground",	CLKEYWORD, kwcl_TitleForeground },
     { "titlehighlight",		TITLE_HILITE, 0 },
+    { "titlehighlightbackground",	CLKEYWORD, kwcl_TitleHighlightBackground },
+    { "titlehighlightforeground",	CLKEYWORD, kwcl_TitleHighlightForeground },
     { "titlepadding",		NKEYWORD, kwn_TitlePadding },
     { "unknownicon",		SKEYWORD, kws_UnknownIcon },
     { "usepposition",		SKEYWORD, kws_UsePPosition },
@@ -589,6 +669,7 @@ static TwmKeyword keytable[] = {
     { "windowring",		WINDOW_RING, 0 },
     { "xorvalue",		NKEYWORD, kwn_XorValue },
     { "zoom",			ZOOM, 0 },
+    { "zoomstate",		ZOOMSTATE, 0 },
 };
 
 static int numkeywords = (sizeof(keytable)/sizeof(keytable[0]));
@@ -616,6 +697,48 @@ int parse_keyword (char *s, int *nump)
 }
 
 
+#ifdef DEBUG_HOTBUTTONS
+static char * unknown_keyword = "unknown?";
+char * return_keyword (int keyword)
+{
+    int i;
+    for (i = 0; i < numkeywords; ++i)
+	if ((keytable[i].value == FKEYWORD || keytable[i].value == FSKEYWORD) && keytable[i].subnum ==  keyword)
+	    return keytable[i].name;
+    return unknown_keyword;
+}
+static char * contexts[] = {"WINDOW", "TITLE", "ICON", "ROOT", "FRAME", "ICONMGR", "NAME", "IDENTIFY"};
+char * return_context (int id)
+{
+    if (id >= 0 && id < NUM_CONTEXTS)
+	return contexts[id];
+    return unknown_keyword;
+}
+static char modstring[1024];
+char * return_modifiers (int mods)
+{
+    modstring[0] = '\0';
+    if (mods & ShiftMask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Shift");
+    if (mods & LockMask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Lock");
+    if (mods & ControlMask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Control");
+    if (mods & Mod1Mask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Mod1");
+    if (mods & Mod2Mask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Mod2");
+    if (mods & Mod3Mask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Mod3");
+    if (mods & Mod4Mask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Mod4");
+    if (mods & Mod5Mask)
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "+Mod5");
+    if (modstring[0] == '\0')
+	snprintf (modstring+strlen(modstring), sizeof(modstring)-strlen(modstring), "-None");
+    return modstring+1;
+}
+#endif
 
 /*
  * action routines called by grammar
@@ -692,25 +815,25 @@ int do_single_keyword (int keyword)
 	RestartPreviousState = True;
 	return 1;
 
-      case kw0_ClientBorderWidth:
+/*    case kw0_ClientBorderWidth:
 	if (Scr->FirstTime) Scr->ClientBorderWidth = TRUE;
-	return 1;
+	return 1;*/
 
       case kw0_NoTitleFocus:
 	Scr->TitleFocus = FALSE;
 	return 1;
 
-      case kw0_RandomPlacement:
+/*    case kw0_RandomPlacement:
 	Scr->RandomPlacement = TRUE;
-	return 1;
+	return 1;*/
 
-      case kw0_DecorateTransients:
+/*    case kw0_DecorateTransients:
 	Scr->DecorateTransients = TRUE;
-	return 1;
+	return 1;*/
 
-      case kw0_ShowIconManager:
+/*      case kw0_ShowIconManager:
 	Scr->ShowIconManager = TRUE;
-	return 1;
+	return 1;*/
 
       case kw0_NoCaseSensitive:
 	Scr->CaseSensitive = FALSE;
@@ -722,6 +845,49 @@ int do_single_keyword (int keyword)
 
       case kw0_WarpUnmapped:
 	Scr->WarpUnmapped = TRUE;
+	return 1;
+
+#ifdef TWM_USE_XFT
+      case kw0_EnableXftFontRenderer:
+	if (Scr->use_xft == 0) /* Xft subsystem available? */
+	    Scr->use_xft = +1;
+	return 1;
+#endif
+#ifdef TWM_USE_RENDER
+      case kw0_EnableXrenderTransparency:
+	Scr->use_xrender = TRUE;
+	return 1;
+#endif
+#ifdef TWM_USE_SLOPPYFOCUS
+      case kw0_SloppyFocus:
+	SloppyFocus = TRUE;
+	return 1;
+#endif
+      case kw0_ShowXUrgencyHints:
+	Scr->ShowXUrgencyHints = TRUE;
+	return 1;
+
+#ifdef TWM_USE_XRANDR
+      case kw0_RestartOnScreenChangeNotify:
+	Scr->RRScreenChangeRestart = TRUE;
+	return 1;
+
+      case kw0_RestartOnScreenSizeChangeNotify:
+	Scr->RRScreenSizeChangeRestart = TRUE;
+	return 1;
+#endif
+      case kw0_RoundedTitle:
+	if (HasShape)
+	    Scr->RoundedTitle = TRUE;
+	return 1;
+
+      case kw0_ShapedIconPixmaps:
+	if (HasShape)
+	    Scr->ShapedIconPixmaps = TRUE;
+	return 1;
+
+      case kw0_FilledIconMgrHighlight:
+	Scr->FilledIconMgrHighlight = TRUE;
 	return 1;
     }
 
@@ -753,8 +919,16 @@ int do_string_keyword (int keyword, char *s)
 	if (!Scr->HaveFonts) Scr->SizeFont.name = s;
 	return 1;
 
+      case kws_MenuTitleFont:
+	if (!Scr->HaveFonts) Scr->MenuTitleFont.name = s;
+	return 1;
+
       case kws_MenuFont:
-	if (!Scr->HaveFonts) Scr->MenuFont.name = s;
+	if (!Scr->HaveFonts) {
+	    if (Scr->MenuTitleFont.name == Scr->MenuFont.name)
+		Scr->MenuTitleFont.name = s;
+	    Scr->MenuFont.name = s;
+	}
 	return 1;
 
       case kws_TitleFont:
@@ -763,6 +937,10 @@ int do_string_keyword (int keyword, char *s)
 
       case kws_IconManagerFont:
 	if (!Scr->HaveFonts) Scr->IconManagerFont.name = s;
+	return 1;
+
+      case kws_DefaultFont:
+	if (!Scr->HaveFonts) Scr->DefaultFont.name = s;
 	return 1;
 
       case kws_UnknownIcon:
@@ -807,7 +985,10 @@ int do_number_keyword (int keyword, int num)
 	return 1;
 
       case kwn_XorValue:
-	if (Scr->FirstTime) Scr->XORvalue = num;
+	if (Scr->FirstTime) {
+	    Scr->XORvalue = num;
+	    XSetForeground(dpy, Scr->DrawGC, Scr->XORvalue);
+	}
 	return 1;
 
       case kwn_FramePadding:
@@ -841,6 +1022,29 @@ int do_number_keyword (int keyword, int num)
       case kwn_Priority:
 	if (HasSync) XSyncSetPriority(dpy, /*self*/ None, num);
 	return 1;
+
+      case kwn_RecoverStolenFocus:
+	if (Scr->FirstTime)
+	    RecoverStolenFocusAttempts = (num < 0 ? 0 : num);
+	return 1;
+
+#ifdef TWM_USE_OPACITY
+      case kwn_MenuOpacity: /* clamp into range: 0 = transparent ... 255 = opaque */
+	if (Scr->FirstTime) Scr->MenuOpacity = (num > 255 ? 255 : (num < 0 ? 0 : num));
+	return 1;
+
+      case kwn_IconOpacity:
+	if (Scr->FirstTime) Scr->IconOpacity = (num > 255 ? 255 : (num < 0 ? 0 : num));
+	return 1;
+
+      case kwn_IconMgrOpacity:
+	if (Scr->FirstTime) Scr->IconMgrOpacity = (num > 255 ? 255 : (num < 0 ? 0 : num));
+	return 1;
+
+      case kwn_InfoOpacity:
+	if (Scr->FirstTime) Scr->InfoOpacity = (num > 255 ? 255 : (num < 0 ? 0 : num));
+	return 1;
+#endif
     }
 
     return 0;
@@ -873,6 +1077,22 @@ name_list **do_colorlist_keyword (int keyword, int colormode, char *s)
 	GetColor (colormode, &Scr->TitleC.back, s);
 	return &Scr->TitleBackgroundL;
 
+      case kwcl_TitleButtonForeground:
+	GetColor (colormode, &Scr->TitleButtonC.fore, s);
+	return &Scr->TitleButtonForegroundL;
+
+      case kwcl_TitleButtonBackground:
+	GetColor (colormode, &Scr->TitleButtonC.back, s);
+	return &Scr->TitleButtonBackgroundL;
+
+      case kwcl_TitleHighlightForeground:
+	GetColor (colormode, &Scr->TitleHighlightC.fore, s);
+	return &Scr->TitleHighlightForegroundL;
+
+      case kwcl_TitleHighlightBackground:
+	GetColor (colormode, &Scr->TitleHighlightC.back, s);
+	return &Scr->TitleHighlightBackgroundL;
+
       case kwcl_IconForeground:
 	GetColor (colormode, &Scr->IconC.fore, s);
 	return &Scr->IconForegroundL;
@@ -884,6 +1104,10 @@ name_list **do_colorlist_keyword (int keyword, int colormode, char *s)
       case kwcl_IconBorderColor:
 	GetColor (colormode, &Scr->IconBorderColor, s);
 	return &Scr->IconBorderColorL;
+
+      case kwcl_IconBitmapColor:
+	GetColor (colormode, &Scr->IconBitmapColor, s);
+	return &Scr->IconBitmapColorL;
 
       case kwcl_IconManagerForeground:
 	GetColor (colormode, &Scr->IconManagerC.fore, s);
@@ -1030,6 +1254,18 @@ assign_var_savecolor()
     case kwcl_TitleBackground:
       put_pixel_on_root(Scr->TitleC.back);
       break;
+    case kwcl_TitleButtonForeground:
+      put_pixel_on_root(Scr->TitleButtonC.fore);
+      break;
+    case kwcl_TitleButtonBackground:
+      put_pixel_on_root(Scr->TitleButtonC.back);
+      break;
+    case kwcl_TitleHighlightForeground:
+      put_pixel_on_root(Scr->TitleHighlightC.fore);
+      break;
+    case kwcl_TitleHighlightBackground:
+      put_pixel_on_root(Scr->TitleHighlightC.back);
+      break;
     case kwcl_IconForeground:
       put_pixel_on_root(Scr->IconC.fore);
       break;
@@ -1038,6 +1274,9 @@ assign_var_savecolor()
       break;
     case kwcl_IconBorderColor:
       put_pixel_on_root(Scr->IconBorderColor);
+      break;
+    case kwcl_IconBitmapColor:
+      put_pixel_on_root(Scr->IconBitmapColor);
       break;
     case kwcl_IconManagerForeground:
       put_pixel_on_root(Scr->IconManagerC.fore);

@@ -72,6 +72,14 @@ typedef void (*event_proc)(void);
 extern Time lastTimestamp;
 #define LastTimestamp() lastTimestamp
 
+#define AcceptsInput(twm)     (((twm)->wmhints==NULL) || (((twm)->wmhints->flags&InputHint)==0) || ((twm)->wmhints->input==True))
+#define ExpectsInput(twm)     (((twm)->wmhints!=NULL) && (((twm)->wmhints->flags&InputHint)!=0) && ((twm)->wmhints->input==True))
+#define ExpectsTakeFocus(twm) (((twm)->protocols & DoesWmTakeFocus)!=0)
+#define GloballyActive(twm)   (((twm)->wmhints!=NULL) && (((twm)->wmhints->flags&InputHint)!=0) && ((twm)->wmhints->input==False) && ExpectsTakeFocus(twm))
+
+extern void HighLightIconManager ( TwmWindow *twm );
+extern void UnHighLightIconManager ( void );
+
 extern void AutoRaiseWindow ( TwmWindow *tmp );
 extern void SetRaiseWindow ( TwmWindow *tmp );
 extern void InitEvents ( void );
@@ -82,8 +90,10 @@ extern Bool DispatchEvent ( void );
 extern void HandleEvents ( void );
 extern void HandleColormapNotify ( void );
 extern void HandleVisibilityNotify ( void );
+extern void HandleKeyRelease ( void );
 extern void HandleKeyPress ( void );
 extern void free_cwins ( TwmWindow *tmp );
+extern void free_window_names ( TwmWindow *tmp, Bool nukefull, Bool nukename, Bool nukeicon );
 extern void HandlePropertyNotify ( void );
 extern void RedoIconName ( void );
 extern void HandleClientMessage ( void );
@@ -99,10 +109,21 @@ extern void HandleButtonRelease ( void );
 extern void HandleButtonPress ( void );
 extern void HandleEnterNotify ( void );
 extern void HandleLeaveNotify ( void );
+extern void HandleFocusChange ( void );
 extern void HandleConfigureRequest ( void );
 extern void HandleShapeNotify ( void );
 extern void HandleUnknown ( void );
+#ifdef TWM_USE_XINERAMA
+extern void HandleConfigureNotify ( void );
+#endif
+#ifdef TWM_USE_XRANDR
+extern void HandleXrandrScreenChangeNotify ( void );
+#endif
 extern int Transient ( Window w, Window *propw );
+extern void DiscardWindowEvents ( Window w, long exception_mask );
+extern ScreenInfo * FindPointerScreenInfo ( void );
+extern ScreenInfo * FindDrawableScreenInfo ( Drawable d );
+extern ScreenInfo * FindWindowScreenInfo ( XWindowAttributes *attr );
 extern ScreenInfo * FindScreenInfo ( Window w );
 extern void InstallWindowColormaps ( int type, TwmWindow *tmp );
 extern void InstallRootColormap ( void );

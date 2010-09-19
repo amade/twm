@@ -54,6 +54,7 @@ typedef struct IconEntry
     short 		used;
 }IconEntry;
 
+extern int FindIconRegionEntryMaxWidth ( struct ScreenInfo *scr );
 extern int roundUp ( int v, int multiple );
 extern void PlaceIcon ( TwmWindow *tmp_win, int def_x, int def_y, 
 		       int *final_x, int *final_y );
@@ -62,5 +63,12 @@ extern void IconDown ( TwmWindow *tmp_win );
 extern void AddIconRegion ( char *geom, int grav1, int grav2, 
 			   int stepx, int stepy );
 extern void CreateIconWindow ( TwmWindow *tmp_win, int def_x, int def_y );
+extern void SetIconWindowHintForFrame ( TwmWindow *tmp_win, Window icon_window );
+
+extern Visual * FindVisual ( int screen, int *class, int *depth );
+extern Pixmap CreateIconWMhintsPixmap ( TwmWindow *tmp_win, int *depth );
+extern void ComputeIconSize ( TwmWindow *tmp_win, int *bm_x, int *bm_y );
+extern Window CreateIconBMWindow ( TwmWindow *tmp_win, int x, int y, Pixmap pm, int pm_depth );
+extern void SetIconShapeMask ( TwmWindow *tmp_win );
 
 #endif /* ICONS_H */

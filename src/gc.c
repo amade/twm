@@ -77,6 +77,7 @@ CreateGCs()
     static ScreenInfo *prevScr = NULL;
     XGCValues	    gcv;
     unsigned long   gcm;
+    Pixmap	    pm;
 
     if (!Scr->FirstTime || prevScr == Scr)
 	return;
@@ -90,16 +91,9 @@ CreateGCs()
     gcm |= GCLineWidth;	    gcv.line_width = 0;
     gcm |= GCForeground;    gcv.foreground = Scr->XORvalue;
     gcm |= GCSubwindowMode; gcv.subwindow_mode = IncludeInferiors;
+    gcm |= GCGraphicsExposures; gcv.graphics_exposures = False;
 
     Scr->DrawGC = XCreateGC(dpy, Scr->Root, gcm, &gcv);
-
-    gcm = 0;
-    gcm |= GCForeground;    gcv.foreground = Scr->MenuC.fore;
-    gcm |= GCBackground;    gcv.background = Scr->MenuC.back;
-    if (!use_fontset)
-	{gcm |= GCFont;	    gcv.font =  Scr->MenuFont.font->fid;}
-
-    Scr->MenuGC = XCreateGC(dpy, Scr->Root, gcm, &gcv);
 
     gcm = 0;
     gcm |= GCPlaneMask;	    gcv.plane_mask = AllPlanes;
@@ -111,5 +105,24 @@ CreateGCs()
     gcm |= GCGraphicsExposures;  gcv.graphics_exposures = False;
     gcm |= GCLineWidth;	    gcv.line_width = 0;
 
-    Scr->NormalGC = XCreateGC(dpy, Scr->Root, gcm, &gcv);
+    pm = XCreatePixmap (dpy, Scr->Root, 1, 1, Scr->d_depth);
+    Scr->NormalGC = XCreateGC(dpy, pm, gcm, &gcv);
+    XFreePixmap (dpy, pm);
+
+    /* create GC for depth-1 pixmaps: */
+    gcv.graphics_exposures = False;
+    pm = XCreatePixmap (dpy, Scr->Root, 1, 1, 1);
+    Scr->BitGC = XCreateGC (dpy, pm, GCGraphicsExposures, &gcv);
+    XFreePixmap (dpy, pm);
+
+#ifdef TWM_USE_RENDER
+    /* create GC for alpha-channel pixmaps: */
+    if (Scr->DepthA > 0)
+    {
+	gcv.graphics_exposures = False;
+	pm = XCreatePixmap (dpy, Scr->Root, 1, 1, Scr->DepthA);
+	Scr->AlphaGC = XCreateGC (dpy, pm, GCGraphicsExposures, &gcv);
+	XFreePixmap (dpy, pm);
+    }
+#endif
 }

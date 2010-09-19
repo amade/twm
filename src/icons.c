@@ -35,6 +35,7 @@ in this Software without prior written authorization from The Open Group.
  **********************************************************************/
 
 #include <stdio.h>
+#include <string.h>
 #include "twm.h"
 #include "screen.h"
 #include "icons.h"
@@ -173,7 +174,7 @@ IconUp (TwmWindow *tmp_win)
       return;
 
     if (tmp_win->icon_moved) {
-	if (!XGetGeometry (dpy, tmp_win->icon_w, &JunkRoot, &defx, &defy,
+	if (!XGetGeometry (dpy, tmp_win->icon_w.win, &JunkRoot, &defx, &defy,
 			   &JunkWidth, &JunkHeight, &JunkBW, &JunkDepth))
 	  return;
 
@@ -192,7 +193,7 @@ IconUp (TwmWindow *tmp_win)
     defy = -100;
     PlaceIcon(tmp_win, defx, defy, &x, &y);
     if (x != defx || y != defy) {
-	XMoveWindow (dpy, tmp_win->icon_w, x, y);
+	XMoveWindow (dpy, tmp_win->icon_w.win, x, y);
 	tmp_win->icon_moved = FALSE;	/* since we've restored it */
     }
 }
@@ -269,6 +270,16 @@ AddIconRegion(char *geom, int grav1, int grav2, int stepx, int stepy)
     IconRegion *ir;
     int mask;
 
+    /*
+     * panel name is encoded into geometry string as "1200x20+10-10@1"
+     * where "@1" is panel "1"
+     */
+    int panel;
+    char *panel_name = strchr (geom, '@');
+    if (panel_name != NULL)
+        *panel_name++ = '\0';
+    panel = ParsePanelIndex (panel_name);
+
     ir = (IconRegion *)malloc(sizeof(IconRegion));
     ir->next = NULL;
     if (Scr->LastRegion)
@@ -286,15 +297,28 @@ AddIconRegion(char *geom, int grav1, int grav2, int stepx, int stepy)
 	stepy = 1;
     ir->stepx = stepx;
     ir->stepy = stepy;
-    ir->x = ir->y = ir->w = ir->h = 0;
+    ir->x = ir->y = 0;
+    ir->w = ir->h = 100;
 
     mask = XParseGeometry(geom, &ir->x, &ir->y, (unsigned int *)&ir->w, (unsigned int *)&ir->h);
 
-    if (mask & XNegative)
-	ir->x += Scr->MyDisplayWidth - ir->w;
+    if (ir->w <= 0)
+	ir->w = 100;
+    if (ir->h <= 0)
+	ir->h = 100;
 
-    if (mask & YNegative)
-	ir->y += Scr->MyDisplayHeight - ir->h;
+#ifdef TILED_SCREEN
+    if (Scr->use_panels == TRUE)
+	EnsureGeometryVisibility (panel, mask, &ir->x, &ir->y, ir->w, ir->h);
+    else
+#endif
+    {
+	if (mask & XNegative)
+	    ir->x += Scr->MyDisplayWidth  - ir->w;
+	if (mask & YNegative)
+	    ir->y += Scr->MyDisplayHeight - ir->h;
+    }
+
     ir->entries = (IconEntry *)malloc(sizeof(IconEntry));
     ir->entries->next = 0;
     ir->entries->x = ir->x;
@@ -335,21 +359,286 @@ FreeIconRegions()
 }
 #endif
 
+void SetIconWindowHintForFrame (TwmWindow *tmp_win, Window icon_window)
+{
+    XWMHints hints, *hintsp;
+    hintsp = XGetWMHints (dpy, tmp_win->frame);
+    if (hintsp == NULL) {
+	hintsp = &hints;
+	hintsp->flags = 0;
+    }
+    hintsp->icon_window = icon_window;
+    hintsp->flags |= IconWindowHint;
+    XSetWMHints (dpy, tmp_win->frame, hintsp);
+    if (hintsp != &hints)
+	XFree (hintsp);
+}
+
+Visual *
+FindVisual (int screen, int *class, int *depth)
+{
+    XVisualInfo *xvi, tmp;
+    Visual *vis = NULL;
+    int n = 0;
+
+    tmp.screen = screen;
+    tmp.class = (*class);
+    tmp.depth = (*depth);
+    xvi = XGetVisualInfo (dpy, (VisualScreenMask
+				| ((*depth) >  0 ? VisualDepthMask : 0)
+				| ((*class) > -1 ? VisualClassMask : 0)),
+			    &tmp, &n);
+    if (xvi)
+    {
+#if defined TWM_USE_RENDER
+	if ((*depth) == 32)
+	{
+	    int i;
+	    for (i = 0; i < n; ++i)
+	    {
+		XRenderPictFormat * format = XRenderFindVisualFormat (dpy, xvi[i].visual);
+		if (format->type == PictTypeDirect && format->direct.alphaMask)
+		{
+		    vis = xvi[i].visual;
+		    (*class) = xvi[i].class;
+		    (*depth) = xvi[i].depth;
+		    break;
+		}
+	    }
+	}
+	if (vis == NULL) /* fallthrough */
+#endif
+	if (0 < n) {
+	    vis = xvi[0].visual;
+	    (*class) = xvi[0].class;
+	    (*depth) = xvi[0].depth;
+	}
+	XFree (xvi);
+    }
+    return vis;
+}
+
+Bool
+ScreenDepthSupported (int depth)
+{
+    Bool ret = False;
+    int ndepths = 0, *depths = NULL;
+
+    depths = XListDepths (dpy, Scr->screen, &ndepths);
+    if (depths) {
+	int i;
+	for (i = 0; i < ndepths; ++i)
+	    if (depths[i] == depth) {
+		ret = True;
+		break;
+	    }
+	XFree (depths);
+    }
+    return ret;
+}
+
+Pixmap
+CreateIconWMhintsPixmap (TwmWindow *tmp_win, int *depth)
+{
+    int pm_depth;
+    Pixmap pm = None;
+
+    if (tmp_win->wmhints && (tmp_win->wmhints->flags & IconPixmapHint))
+    {
+	Bool dptOk;
+	XGetGeometry (dpy, tmp_win->wmhints->icon_pixmap, &JunkRoot, &JunkX, &JunkY,
+			(unsigned int *)&tmp_win->icon_width, (unsigned int *)&tmp_win->icon_height,
+			&JunkBW, (unsigned int *)&pm_depth);
+#if 0
+	/* create 'icon_pixmap' copy as deep as 'twm'-depth: */
+	pm = XCreatePixmap (dpy, Scr->Root, tmp_win->icon_width, tmp_win->icon_height, Scr->d_depth);
+
+	if (pm_depth == 1) {
+	    FB(Scr, tmp_win->IconBitmapColor, tmp_win->IconC.back);
+	    XCopyPlane (dpy, tmp_win->wmhints->icon_pixmap, pm, Scr->NormalGC,
+			0, 0, tmp_win->icon_width, tmp_win->icon_height, 0, 0, 1);
+	} else if (pm_depth == Scr->d_depth)
+	    XCopyArea (dpy, tmp_win->wmhints->icon_pixmap, pm, Scr->NormalGC,
+			0,0, tmp_win->icon_width, tmp_win->icon_height, 0, 0);
+	else
+	{
+	    /*
+	     * This is a trick: copy 'icon_pixmap' plane-by-plane into backup copy,
+	     * regardless of how it appears later in respect to the 'twm'-colormap.
+	     */
+	    int i;
+	    XSetForeground (dpy, Scr->NormalGC, 0);
+	    XFillRectangle (dpy, pm, Scr->NormalGC, 0, 0, tmp_win->icon_width, tmp_win->icon_height);
+	    XSetBackground (dpy, Scr->NormalGC, 0);
+	    XSetForeground (dpy, Scr->NormalGC, AllPlanes);
+	    for (i = 0; i != pm_depth && i < Scr->d_depth; ++i) {
+		XSetPlaneMask (dpy, Scr->NormalGC, (1<<i));
+		XCopyPlane (dpy, tmp_win->wmhints->icon_pixmap, pm, Scr->NormalGC,
+			    0, 0, tmp_win->icon_width, tmp_win->icon_height, 0, 0, (1<<i));
+	    }
+	    XSetPlaneMask (dpy, Scr->NormalGC, AllPlanes);
+	}
+	/* attention: set 'icon_pixmap' depth to 'twm'-depth: */
+	(*depth) = Scr->d_depth;
+#else
+	/* create 'icon_pixmap' copy as deep as it is ("tmp_win->icon_bm_w" has to be as deep): */
+	dptOk = ScreenDepthSupported (pm_depth);
+	if (pm_depth == 1 || dptOk == False)
+	    pm = XCreatePixmap (dpy, Scr->Root, tmp_win->icon_width, tmp_win->icon_height, Scr->d_depth);
+	else
+	    pm = XCreatePixmap (dpy, Scr->Root, tmp_win->icon_width, tmp_win->icon_height, pm_depth);
+	if (pm != None)
+	{
+	    if (pm_depth == 1) {
+		FB(Scr, tmp_win->IconBitmapColor, tmp_win->IconC.back);
+		XCopyPlane (dpy, tmp_win->wmhints->icon_pixmap, pm, Scr->NormalGC,
+			    0, 0, tmp_win->icon_width, tmp_win->icon_height, 0, 0, 1);
+		pm_depth = Scr->d_depth;
+	    } else if (dptOk == True) {
+		GC gc;
+		Gcv.graphics_exposures = False;
+		gc = XCreateGC (dpy, pm, GCGraphicsExposures, &Gcv);
+		XCopyArea (dpy, tmp_win->wmhints->icon_pixmap, pm, gc,
+			    0, 0, tmp_win->icon_width, tmp_win->icon_height, 0, 0);
+		XFreeGC (dpy, gc);
+	    } else {
+		/*
+		 * This is a trick: copy 'icon_pixmap' plane-by-plane into backup copy,
+		 * regardless of how it appears later in respect to the 'twm'-colormap.
+		 */
+		int i;
+		XSetForeground (dpy, Scr->NormalGC, 0);
+		XFillRectangle (dpy, pm, Scr->NormalGC, 0, 0, tmp_win->icon_width, tmp_win->icon_height);
+		XSetBackground (dpy, Scr->NormalGC, 0);
+		XSetForeground (dpy, Scr->NormalGC, AllPlanes);
+		for (i = 0; i != pm_depth && i < Scr->d_depth; ++i) {
+		    XSetPlaneMask (dpy, Scr->NormalGC, (1<<i));
+		    XCopyPlane (dpy, tmp_win->wmhints->icon_pixmap, pm, Scr->NormalGC,
+				0, 0, tmp_win->icon_width, tmp_win->icon_height, 0, 0, (1<<i));
+		}
+		XSetPlaneMask (dpy, Scr->NormalGC, AllPlanes);
+		pm_depth = Scr->d_depth;
+	    }
+	    (*depth) = pm_depth;
+	}
+#endif
+    }
+    return pm;
+}
+
+void
+ComputeIconSize (TwmWindow *tmp_win, int *bm_x, int *bm_y)
+{
+    tmp_win->icon_w_width = MyFont_TextWidth(&Scr->IconFont,
+	tmp_win->icon_name, strlen(tmp_win->icon_name));
+
+#ifdef TWM_USE_SPACING
+    tmp_win->icon_w_width += Scr->IconFont.height; /*approx. '1ex' on both sides*/
+#else
+    tmp_win->icon_w_width += 6;
+#endif
+
+    if (tmp_win->icon_w_width > Scr->IconRegionEntryMaxWidth)
+	tmp_win->icon_w_width = Scr->IconRegionEntryMaxWidth;
+
+    if (tmp_win->icon_w_width < tmp_win->icon_width)
+    {
+	tmp_win->icon_x = (tmp_win->icon_width - tmp_win->icon_w_width)/2;
+	tmp_win->icon_x += 3;
+	tmp_win->icon_w_width = tmp_win->icon_width;
+    }
+    else
+    {
+#ifdef TWM_USE_SPACING
+	tmp_win->icon_x = Scr->IconFont.height/2;
+#else
+	tmp_win->icon_x = 3;
+#endif
+    }
+
+#ifdef TWM_USE_SPACING
+    /* icon label height := 1.44 times font height: */
+    tmp_win->icon_w_height = tmp_win->icon_height + 144*Scr->IconFont.height/100;
+    tmp_win->icon_y = tmp_win->icon_height + Scr->IconFont.y + 44*Scr->IconFont.height/200;
+#else
+    tmp_win->icon_y = tmp_win->icon_height + Scr->IconFont.height;
+    tmp_win->icon_w_height = tmp_win->icon_height + Scr->IconFont.height + 4;
+#endif
+
+    if (tmp_win->icon_w_width == tmp_win->icon_width)
+	(*bm_x) = 0;
+    else
+	(*bm_x) = (tmp_win->icon_w_width - tmp_win->icon_width)/2;
+    (*bm_y) = 0;
+}
+
+Window
+CreateIconBMWindow (TwmWindow *tmp_win, int x, int y, Pixmap pm, int pm_depth)
+{
+    unsigned long valuemask;
+    XSetWindowAttributes attributes;
+    Visual *vis;
+
+    attributes.background_pixmap = pm;
+    attributes.border_pixel = BlackPixel (dpy, Scr->screen);
+    valuemask = (CWBackPixmap | CWBorderPixel);
+
+    if (pm_depth == tmp_win->attr.depth) { /* give icon pixmap the client visual */
+	vis = tmp_win->attr.visual;
+	attributes.colormap = tmp_win->attr.colormap;
+	valuemask |= CWColormap;
+    } else if (pm_depth == Scr->d_depth) { /* give icon pixmap the 'twm' visual */
+	vis = Scr->d_visual;
+	attributes.colormap = Scr->TwmRoot.cmaps.cwins[Scr->TwmRoot.cmaps.number_cwins-1]->colormap->c;
+	valuemask |= CWColormap;
+    } else {
+	int class = -1;
+	vis = FindVisual (Scr->screen, &class, &pm_depth);
+	if (vis) {
+#if 0
+	    attributes.colormap = XCreateColormap (dpy, Scr->Root, vis, AllocNone);
+	    valuemask |= CWColormap; /* do we leak this colorpam, without any colors? */
+#endif
+	} else {
+	    /* here we have problems: no visual, no colormap; expect X-error below. */
+	    attributes.colormap = None;
+	    XSync (dpy, False);
+	    fprintf (stderr, "%s: Problem creating an icon visual occurred (client '%s').\n",
+			ProgramName, tmp_win->full_name);
+	    fflush (stderr);
+	}
+    }
+
+    return XCreateWindow (dpy, tmp_win->icon_w.win, x, y,
+				(unsigned int)tmp_win->icon_width,
+				(unsigned int)tmp_win->icon_height,
+				(unsigned int) 0,
+				pm_depth,
+				(unsigned int) CopyFromParent,
+				vis,
+				valuemask, &attributes);
+}
+
 void
 CreateIconWindow(TwmWindow *tmp_win, int def_x, int def_y)
 {
+#ifdef TWM_USE_RENDER
+    XRenderColor xrcol;
+#endif
     unsigned long event_mask;
     unsigned long valuemask;		/* mask for create windows */
     XSetWindowAttributes attributes;	/* attributes for create windows */
     Pixmap pm = None;			/* tmp pixmap variable */
-    int final_x, final_y;
-    int x;
+    int pm_depth;			/* depth of tmp_win->wmhints->icon_pixmap */
+    int x, y, final_x, final_y;
 
-
-    FB(tmp_win->iconc.fore, tmp_win->iconc.back);
 
     tmp_win->forced = FALSE;
     tmp_win->icon_not_ours = FALSE;
+    tmp_win->icon_width = 0;
+    tmp_win->icon_height = 0;
+    FB(Scr, tmp_win->IconBitmapColor, tmp_win->IconC.back);
+    pm_depth = Scr->d_depth;
 
     /* now go through the steps to get an icon window,  if ForceIcon is 
      * set, then no matter what else is defined, the bitmap from the
@@ -396,21 +685,8 @@ CreateIconWindow(TwmWindow *tmp_win, int def_x, int def_y)
      * that could mean that ForceIcon was not set, or that the window
      * was not in the Icons list, now check the WM hints for an icon
      */
-    if (pm == None && tmp_win->wmhints &&
-	tmp_win->wmhints->flags & IconPixmapHint)
-    {
-    
-	XGetGeometry(dpy,   tmp_win->wmhints->icon_pixmap,
-             &JunkRoot, &JunkX, &JunkY,
-	     (unsigned int *)&tmp_win->icon_width, (unsigned int *)&tmp_win->icon_height, &JunkBW, &JunkDepth);
-
-	pm = XCreatePixmap(dpy, Scr->Root,
-			   tmp_win->icon_width, tmp_win->icon_height,
-			   Scr->d_depth);
-
-	XCopyPlane(dpy, tmp_win->wmhints->icon_pixmap, pm, Scr->NormalGC,
-	    0,0, tmp_win->icon_width, tmp_win->icon_height, 0, 0, 1 );
-    }
+    if (pm == None)
+	pm = CreateIconWMhintsPixmap (tmp_win, &pm_depth);
 
     /* if we still haven't got an icon, let's look in the Icon list 
      * if ForceIcon is not set
@@ -465,68 +741,89 @@ CreateIconWindow(TwmWindow *tmp_win, int def_x, int def_y)
 	    0,0, tmp_win->icon_width, tmp_win->icon_height, 0, 0, 1 );
     }
 
-    if (pm == None)
-    {
-	tmp_win->icon_height = 0;
-	tmp_win->icon_width = 0;
-	valuemask = 0;
-    }
-    else
-    {
-	valuemask = CWBackPixmap;
-	attributes.background_pixmap = pm;
-    }
-
-    tmp_win->icon_w_width = MyFont_TextWidth(&Scr->IconFont,
-	tmp_win->icon_name, strlen(tmp_win->icon_name));
-
-    tmp_win->icon_w_width += 6;
-    if (tmp_win->icon_w_width < tmp_win->icon_width)
-    {
-	tmp_win->icon_x = (tmp_win->icon_width - tmp_win->icon_w_width)/2;
-	tmp_win->icon_x += 3;
-	tmp_win->icon_w_width = tmp_win->icon_width;
-    }
-    else
-    {
-	tmp_win->icon_x = 3;
-    }
-    tmp_win->icon_y = tmp_win->icon_height + Scr->IconFont.height;
-    tmp_win->icon_w_height = tmp_win->icon_height + Scr->IconFont.height + 4;
+    ComputeIconSize (tmp_win, &x, &y);
 
     event_mask = 0;
     if (tmp_win->wmhints && tmp_win->wmhints->flags & IconWindowHint)
     {
-	tmp_win->icon_w = tmp_win->wmhints->icon_window;
+	tmp_win->icon_w.win = tmp_win->wmhints->icon_window;
 	if (tmp_win->forced ||
-	    XGetGeometry(dpy, tmp_win->icon_w, &JunkRoot, &JunkX, &JunkY,
+	    XGetGeometry(dpy, tmp_win->icon_w.win, &JunkRoot, &JunkX, &JunkY,
 		     (unsigned int *)&tmp_win->icon_w_width, (unsigned int *)&tmp_win->icon_w_height,
 		     &JunkBW, &JunkDepth) == 0)
 	{
-	    tmp_win->icon_w = None;
+	    tmp_win->icon_w.win = None;
 	    tmp_win->wmhints->flags &= ~IconWindowHint;
 	}
 	else
 	{
 	    tmp_win->icon_not_ours = TRUE;
 	    event_mask = EnterWindowMask | LeaveWindowMask;
+	    SetIconWindowHintForFrame (tmp_win, tmp_win->icon_w.win);
 	}
     }
     else
     {
-	tmp_win->icon_w = None;
+	tmp_win->icon_w.win = None;
     }
 
-    if (tmp_win->icon_w == None)
+    if (tmp_win->icon_w.win == None)
     {
-	tmp_win->icon_w = XCreateSimpleWindow(dpy, Scr->Root,
-	    0,0,
-	    tmp_win->icon_w_width, tmp_win->icon_w_height,
-	    Scr->IconBorderWidth, tmp_win->icon_border, tmp_win->iconc.back);
+	attributes.colormap = Scr->TwmRoot.cmaps.cwins[Scr->TwmRoot.cmaps.number_cwins-1]->colormap->c;
+	attributes.border_pixel = tmp_win->IconBorderColor;
+	attributes.background_pixel = tmp_win->IconC.back;
+	valuemask = (CWColormap | CWBorderPixel | CWBackPixel);
+
+/*#ifdef TWM_USE_OPACITY*/
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE)
+	    valuemask &= ~CWBackPixel;
+#endif
+/*#endif*/
+
+	tmp_win->icon_w.win = XCreateWindow (dpy, Scr->Root, 0, 0,
+					    tmp_win->icon_w_width,
+					    tmp_win->icon_w_height,
+					    Scr->IconBorderWidth,
+					    Scr->d_depth,
+					    (unsigned int) CopyFromParent,
+					    Scr->d_visual,
+					    valuemask, &attributes);
 	event_mask = ExposureMask;
+
+#ifdef TWM_USE_RENDER
+	CopyPixelToXRenderColor (tmp_win->IconC.back, &xrcol);
+#ifdef TWM_USE_OPACITY
+	if (Scr->XCompMgrRunning == TRUE) {
+	    xrcol.alpha = Scr->IconOpacity * 257;
+	    xrcol.red = xrcol.red * xrcol.alpha / 0xffff; /* premultiply */
+	    xrcol.green = xrcol.green * xrcol.alpha / 0xffff;
+	    xrcol.blue = xrcol.blue * xrcol.alpha / 0xffff;
+	}
+#endif
+	if (tmp_win->PenIconB != None)
+	    XRenderFreePicture (dpy, tmp_win->PenIconB);
+	tmp_win->PenIconB = Create_Color_Pen (&xrcol);
+	if (tmp_win->PicIconB != None) {
+	    XRenderFreePicture (dpy, tmp_win->PicIconB);
+	    tmp_win->PicIconB = None;
+	}
+#ifdef TWM_USE_OPACITY
+	if (Scr->use_xrender == FALSE)
+#endif
+#endif
+#ifdef TWM_USE_OPACITY
+	    SetWindowOpacity (tmp_win->icon_w.win, Scr->IconOpacity);
+#endif
+
+#ifdef TWM_USE_XFT
+	if (Scr->use_xft > 0)
+	    tmp_win->icon_w.xft = MyXftDrawCreate (tmp_win->icon_w.win);
+#endif
+	SetIconWindowHintForFrame (tmp_win, tmp_win->icon_w.win);
     }
 
-    XSelectInput (dpy, tmp_win->icon_w,
+    XSelectInput (dpy, tmp_win->icon_w.win,
 		  KeyPressMask | ButtonPressMask | ButtonReleaseMask |
 		  event_mask);
 
@@ -534,21 +831,7 @@ CreateIconWindow(TwmWindow *tmp_win, int def_x, int def_y)
     if (pm != None &&
 	(! (tmp_win->wmhints && tmp_win->wmhints->flags & IconWindowHint)))
     {
-	int y;
-
-	y = 0;
-	if (tmp_win->icon_w_width == tmp_win->icon_width)
-	    x = 0;
-	else
-	    x = (tmp_win->icon_w_width - tmp_win->icon_width)/2;
-
-	tmp_win->icon_bm_w = XCreateWindow (dpy, tmp_win->icon_w, x, y,
-					    (unsigned int)tmp_win->icon_width,
-					    (unsigned int)tmp_win->icon_height,
-					    (unsigned int) 0, Scr->d_depth,
-					    (unsigned int) CopyFromParent,
-					    Scr->d_visual, valuemask,
-					    &attributes);
+	tmp_win->icon_bm_w = CreateIconBMWindow (tmp_win, x, y, pm, pm_depth);
     }
 
     /* I need to figure out where to put the icon window now, because 
@@ -565,21 +848,164 @@ CreateIconWindow(TwmWindow *tmp_win, int def_x, int def_y)
 	PlaceIcon(tmp_win, def_x, def_y, &final_x, &final_y);
     }
 
-    if (final_x > Scr->MyDisplayWidth)
-	final_x = Scr->MyDisplayWidth - tmp_win->icon_w_width -
-	    (2 * Scr->IconBorderWidth);
+    EnsureRectangleOnScreen (&final_x, &final_y,
+	    tmp_win->icon_w_width  + 2*Scr->IconBorderWidth,
+	    tmp_win->icon_w_height + 2*Scr->IconBorderWidth);
 
-    if (final_y > Scr->MyDisplayHeight)
-	final_y = Scr->MyDisplayHeight - tmp_win->icon_height -
-	    Scr->IconFont.height - 4 - (2 * Scr->IconBorderWidth);
-
-    XMoveWindow(dpy, tmp_win->icon_w, final_x, final_y);
+    XMoveWindow(dpy, tmp_win->icon_w.win, final_x, final_y);
     tmp_win->iconified = TRUE;
 
-    XMapSubwindows(dpy, tmp_win->icon_w);
-    XSaveContext(dpy, tmp_win->icon_w, TwmContext, (caddr_t)tmp_win);
-    XSaveContext(dpy, tmp_win->icon_w, ScreenContext, (caddr_t)Scr);
-    XDefineCursor(dpy, tmp_win->icon_w, Scr->IconCursor);
-    if (pm) XFreePixmap (dpy, pm);
-    return;
+    XMapSubwindows(dpy, tmp_win->icon_w.win);
+    XSaveContext(dpy, tmp_win->icon_w.win, TwmContext, (caddr_t)tmp_win);
+    XSaveContext(dpy, tmp_win->icon_w.win, ScreenContext, (caddr_t)Scr);
+    XDefineCursor(dpy, tmp_win->icon_w.win, Scr->IconCursor);
+
+    SetIconShapeMask (tmp_win);
+
+    if (pm)
+	XFreePixmap (dpy, pm);
 }
+
+int
+FindIconRegionEntryMaxWidth (struct ScreenInfo *scr)
+{
+    int   m;
+
+    if (scr->FirstRegion) {
+	IconRegion * ir = scr->FirstRegion;
+	m = ir->stepx;
+	for (ir = ir->next; ir; ir = ir->next)
+	    if (m < ir->stepx)
+		m = ir->stepx;
+	m -= scr->IconBorderWidth * 2;
+    } else
+	m = scr->MyDisplayWidth;
+
+    return m;
+}
+
+void
+SetIconShapeMask (TwmWindow *tmp_win)
+{
+#ifdef TWM_USE_RENDER
+    if ((HasShape || (Scr->use_xrender == TRUE)) && (tmp_win->icon_not_ours != TRUE))
+#else
+    if (HasShape && (tmp_win->icon_not_ours != TRUE))
+#endif
+    {
+	Pixmap mask;
+	GC gc;
+#ifdef TWM_USE_RENDER
+	if (Scr->use_xrender == TRUE) {
+	    mask = XCreatePixmap (dpy, Scr->Root, tmp_win->icon_w_width, tmp_win->icon_w_height, Scr->DepthA);
+	    gc = Scr->AlphaGC;
+	}
+	else
+#endif
+	{
+	    mask = XCreatePixmap (dpy, Scr->Root, tmp_win->icon_w_width, tmp_win->icon_w_height, 1);
+	    gc = Scr->BitGC;
+	}
+
+	if (mask != None)
+	{
+	    int x, y;
+	    Bool m = False;
+
+	    /* cleanup mask: */
+	    XSetForeground (dpy, gc, 0);
+	    XFillRectangle (dpy, mask, gc, 0, 0, tmp_win->icon_w_width, tmp_win->icon_w_height);
+
+	    /* set shape for icon caption text: */
+	    if (Scr->ShapedIconLabels == TRUE)
+	    {
+#ifdef TWM_USE_SPACING
+		x = tmp_win->icon_w_width - Scr->IconFont.height;
+#else
+		x = tmp_win->icon_w_width - 6;
+#endif
+		MyFont_DrawShapeStringEllipsis (mask, &Scr->IconFont,
+				    tmp_win->icon_x, tmp_win->icon_y,
+				    tmp_win->icon_name, strlen(tmp_win->icon_name),
+				    x, Scr->IconLabelOffsetX, Scr->IconLabelOffsetY);
+		m = True;
+	    } else if (Scr->ShapedIconPixmaps == TRUE && tmp_win->icon_bm_w != None) {
+		y = tmp_win->icon_w_height - tmp_win->icon_height;
+		XSetForeground (dpy, gc, AllPlanes);
+		XFillRectangle (dpy, mask, gc, 0, tmp_win->icon_height, tmp_win->icon_w_width, y);
+		m = True;
+	    }
+
+	    /* set shape for icon-pixmap window: */
+	    if (tmp_win->icon_bm_w != None)
+	    {
+		Pixmap src = None;
+
+		if ((tmp_win->wmhints->flags & IconPixmapHint)
+			    && XGetGeometry(dpy, tmp_win->wmhints->icon_pixmap,
+				&JunkRoot, &JunkX, &JunkY, &JunkWidth, &JunkHeight,
+				&JunkBW, &JunkDepth) && JunkDepth == 1)
+		{
+		    src = tmp_win->wmhints->icon_pixmap;
+		}
+		else if ((tmp_win->wmhints->flags & IconMaskHint)
+			    && XGetGeometry(dpy, tmp_win->wmhints->icon_mask,
+				&JunkRoot, &JunkX, &JunkY, &JunkWidth, &JunkHeight,
+				&JunkBW, &JunkDepth) && JunkDepth == 1)
+		{
+		    src = tmp_win->wmhints->icon_mask;
+		}
+
+#ifdef TWM_USE_RENDER
+		if (HasShape && (src != None))
+#else
+		if (src != None)
+#endif
+		    XShapeCombineMask (dpy, tmp_win->icon_bm_w, ShapeBounding, 0, 0, src, ShapeSet);
+
+		x = (tmp_win->icon_w_width - tmp_win->icon_width) / 2;
+		y = 0;
+
+		XSetForeground (dpy, gc, AllPlanes);
+		if (Scr->ShapedIconPixmaps == TRUE) {
+		    if (src != None) {
+			XSetBackground (dpy, gc, 0);
+			XCopyPlane (dpy, src, mask, gc, 0, 0, tmp_win->icon_width, tmp_win->icon_height, x, y, 1);
+		    } else {
+			XFillRectangle (dpy, mask, gc, x, y, tmp_win->icon_width, tmp_win->icon_height);
+		    }
+		    m = True;
+		} else if (Scr->ShapedIconLabels == TRUE) {
+		    XFillRectangle (dpy, mask, gc, x, y, tmp_win->icon_width, tmp_win->icon_height);
+		    m = True;
+		}
+	    }
+
+	    if (m == True)
+	    {
+#ifdef TWM_USE_RENDER
+		if (Scr->use_xrender == TRUE)
+		{
+		    if (tmp_win->PicIconB != None)
+			XRenderFreePicture (dpy, tmp_win->PicIconB);
+		    tmp_win->PicIconB = XRenderCreatePicture (dpy, mask, XRenderFindStandardFormat (dpy, Scr->FormatA), CPGraphicsExposure, &Scr->PicAttr);
+		}
+		else
+#endif
+		{
+		    XRectangle txt;
+		    txt.x = 0;
+		    txt.y = 0;
+		    txt.width = tmp_win->icon_w_width;
+		    txt.height = tmp_win->icon_w_height;
+		    XShapeCombineMask (dpy, tmp_win->icon_w.win, ShapeBounding, 0, 0, None, ShapeSet);
+		    XShapeCombineRectangles (dpy, tmp_win->icon_w.win, ShapeBounding, 0, 0, &txt, 1, ShapeSubtract, Unsorted);
+		    XShapeCombineMask (dpy, tmp_win->icon_w.win, ShapeBounding, 0, 0, mask, ShapeUnion);
+		}
+	    }
+
+	    XFreePixmap (dpy, mask);
+	}
+    }
+}
+

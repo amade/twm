@@ -62,6 +62,7 @@ Author:  Ralph Mor, X Consortium
 #include <X11/Xatom.h>
 #include <stdio.h>
 #include "twm.h"
+#include "parse.h"
 #include "screen.h"
 #include "session.h"
 
@@ -382,14 +383,14 @@ char *windowRole;
     if (!write_byte (configFile, theWindow->icon ? 1 : 0))    /* iconified */
 	return 0;
 
-    if (!write_byte (configFile, theWindow->icon_w ? 1 : 0))  /* icon exists */
+    if (!write_byte (configFile, theWindow->icon_w.win ? 1 : 0))  /* icon exists */
 	return 0;
 
-    if (theWindow->icon_w)
+    if (theWindow->icon_w.win)
     {
 	int icon_x, icon_y;
 
-	XGetGeometry (dpy, theWindow->icon_w, &JunkRoot, &icon_x,
+	XGetGeometry (dpy, theWindow->icon_w.win, &JunkRoot, &icon_x,
 	    &icon_y, &JunkWidth, &JunkHeight, &JunkBW, &JunkDepth);
 
 	if (!write_short (configFile, (short) icon_x))
@@ -398,14 +399,31 @@ char *windowRole;
 	    return 0;
     }
 
-    if (!write_short (configFile, (short) theWindow->frame_x))
-	return 0;
-    if (!write_short (configFile, (short) theWindow->frame_y))
-	return 0;
-    if (!write_ushort (configFile, (unsigned short) theWindow->attr.width))
-	return 0;
-    if (!write_ushort (configFile, (unsigned short) theWindow->attr.height))
-	return 0;
+    if (theWindow->zoomed != ZOOM_NONE
+		&& theWindow->zoomed != F_PANELGEOMETRYZOOM
+		&& theWindow->zoomed != F_PANELGEOMETRYMOVE)
+    {
+	if (!write_short (configFile, (short) theWindow->save_frame_x))
+	    return 0;
+	if (!write_short (configFile, (short) theWindow->save_frame_y))
+	    return 0;
+	if (!write_ushort (configFile, (unsigned short) theWindow->save_frame_width))
+	    return 0;
+	if (!write_ushort (configFile, (unsigned short) theWindow->save_frame_height
+					    - theWindow->title_height))
+	    return 0;
+    }
+    else
+    {
+	if (!write_short (configFile, (short) theWindow->frame_x))
+	    return 0;
+	if (!write_short (configFile, (short) theWindow->frame_y))
+	    return 0;
+	if (!write_ushort (configFile, (unsigned short) theWindow->attr.width))
+	    return 0;
+	if (!write_ushort (configFile, (unsigned short) theWindow->attr.height))
+	    return 0;
+    }
 
     if (!write_byte (configFile, theWindow->widthEverChangedByUser ? 1 : 0))
 	return 0;
@@ -832,7 +850,7 @@ SmPointer clientData;
     path = getenv ("SM_SAVE_DIR");
     if (!path)
     {
-	path = getenv ("HOME");
+	path = Home;
 	if (!path)
 	    path = ".";
     }
@@ -864,19 +882,21 @@ SmPointer clientData;
 
 	    while (theWindow && success)
 	    {
-		clientId = GetClientID (theWindow->w);
-		windowRole = GetWindowRole (theWindow->w);
+		if (theWindow->iconmgr == FALSE)
+		{
+		    clientId = GetClientID (theWindow->w);
+		    windowRole = GetWindowRole (theWindow->w);
 
-		if (!WriteWinConfigEntry (configFile, theWindow,
-		    clientId, windowRole))
-		    success = False;
+		    if (!WriteWinConfigEntry (configFile, theWindow,
+						clientId, windowRole))
+			success = False;
 
-		if (clientId)
-		    XFree (clientId);
+		    if (clientId)
+			XFree (clientId);
 
-		if (windowRole)
-		    XFree (windowRole);
-
+		    if (windowRole)
+			XFree (windowRole);
+		}
 		theWindow = theWindow->next;
 	    }
 	}

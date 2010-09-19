@@ -77,10 +77,14 @@ typedef struct MenuItem
     struct MenuRoot *root;	/* back pointer to my MenuRoot */
     char *item;			/* the character string displayed */
     char *action;		/* action to be performed */
-    Pixel fore;			/* foreground color */
-    Pixel back;			/* background color */
-    Pixel hi_fore;		/* highlight foreground */
-    Pixel hi_back;		/* highlight background */
+    ColorPair MenuC;		/* menuitem nonhighlight foreground/background */
+    ColorPair MenuHiC;		/* menuitem highlight foreground/background */
+#ifdef TWM_USE_RENDER
+    XRenderColor XRcolMenuB;	/* menuitem nonhighlight premultiplied translucent background */
+    XRenderColor XRcolMenuHiB;	/* menuitem highlight translucent translucent background */
+    Picture PenMenuF;		/* menuitem nonhighlight PenpullPm foreground */
+    Picture PenMenuHiF;		/* menuitem highlight PenpullPm foreground */
+#endif
     short item_num;		/* item number of this menu */
     short x;			/* x coordinate for text */
     short func;			/* twm built in function */
@@ -96,10 +100,12 @@ typedef struct MenuRoot
     struct MenuRoot *prev;	/* previous root menu if pull right */
     struct MenuRoot *next;	/* next in list of root menus */
     char *name;			/* name of root */
-    Window w;			/* the window of the menu */
+    MyWindow w;			/* the window of the menu */
     Window shadow;		/* the shadow window */
-    Pixel hi_fore;		/* highlight foreground */
-    Pixel hi_back;		/* highlight background */
+    ColorPair MenuHiC;		/* highlight foreground/background */
+#ifdef TWM_USE_RENDER
+    Pixmap backingstore;	/* screen copy of menu window background */
+#endif
     short mapped;		/* NEVER_MAPPED, UNMAPPED, or MAPPED */
     short height;		/* height of the menu */
     short width;		/* width of the menu */
@@ -171,6 +177,7 @@ extern void InitMenus ( void );
 extern Bool AddFuncKey ( char *name, int cont, int mods, int func, char *win_name, char *action );
 extern int CreateTitleButton ( char *name, int func, char *action, MenuRoot *menuroot, Bool rightside, Bool append );
 extern void InitTitlebarButtons ( void );
+extern void InitTitlebarCorners ( void );
 extern void PaintEntry ( MenuRoot *mr, MenuItem *mi, int exposure );
 extern void PaintMenu ( MenuRoot *mr, XEvent *e );
 extern void UpdateMenu ( void );
@@ -187,20 +194,25 @@ extern int ExecuteFunction ( int func, char *action, Window w, TwmWindow *tmp_wi
 extern int DeferExecution ( int context, int func, Cursor cursor );
 extern void ReGrab ( void );
 extern Bool NeedToDefer ( MenuRoot *root );
-extern void Execute ( char *s );
+extern void Execute ( struct ScreenInfo *scr, char *s );
 extern void FocusOnRoot ( void );
+extern void FocusedOnRoot ( void );
+extern void FocusOnClient ( TwmWindow *tmp_win );
+extern void FocusedOnClient ( TwmWindow *tmp_win );
 extern void DeIconify ( TwmWindow *tmp_win );
 extern void Iconify ( TwmWindow *tmp_win, int def_x, int def_y );
+extern void Identify ( TwmWindow *t );
 extern void SetMapStateProp ( TwmWindow *tmp_win, int state );
-extern void WarpToScreen ( int n, int inc );
+extern void WarpToScreen ( struct ScreenInfo *scr, int n, int inc );
 extern void BumpWindowColormap ( TwmWindow *tmp, int inc );
-extern void HideIconManager ( void );
 extern void SetBorder ( TwmWindow *tmp, Bool onoroff );
 extern void DestroyMenu ( MenuRoot *menu );
 extern void WarpAlongRing ( XButtonEvent *ev, Bool forward );
 extern void WarpToWindow ( TwmWindow *t );
+extern void WarpToIconManager ( struct WList *t );
 extern void SendDeleteWindowMessage ( TwmWindow *tmp, Time timestamp );
 extern void SendSaveYourselfMessage ( TwmWindow *tmp, Time timestamp );
 extern void SendTakeFocusMessage ( TwmWindow *tmp, Time timestamp );
+extern void RaiseInfoWindow (int x, int y);
 
 #endif /* _MENUS_ */

@@ -72,6 +72,8 @@ extern void GetUnknownIcon ( char *name );
 extern Pixmap FindBitmap ( char *name, unsigned int *widthp, 
 			   unsigned int *heightp );
 extern Pixmap GetBitmap ( char *name );
+extern Pixmap CreateMenuIcon ( int height, unsigned int *widthp, unsigned int *heightp );
+extern Pixmap CreateIconMgrIcon ( int depth, int height, unsigned int *widthp, unsigned int *heightp );
 extern void InsertRGBColormap ( Atom a, XStandardColormap *maps, int nmaps, 
 			       Bool replace );
 extern void RemoveRGBColormap ( Atom a );
@@ -80,17 +82,55 @@ extern void GetColor ( int kind, Pixel *what, char *name );
 extern void GetColorValue ( int kind, XColor *what, char *name );
 extern void GetFont ( MyFont *font );
 extern int MyFont_TextWidth( MyFont *font, char *string, int len);
-extern void MyFont_DrawImageString( Display *dpy, Drawable d, MyFont *font, 
-				    GC gc, int x, int y, char * string, 
-				    int len);
-extern void MyFont_DrawString( Display *dpy, Drawable d, MyFont *font, 
-			       GC gc, int x, int y, char * string, int len);
-extern void MyFont_ChangeGC( unsigned long fix_fore, unsigned long fix_back, 
-			     MyFont *fix_font);
-extern Status I18N_FetchName( Display *dpy, Window win, char **winname);
-extern Status I18N_GetIconName( Display *dpy, Window win, char **iconname);
+extern void MyFont_DrawImageString ( MyWindow *win, MyFont *font, ColorPair *col,
+				    int x, int y, char * string, int len);
+extern void MyFont_DrawImageStringEllipsis ( MyWindow *win, MyFont *font, ColorPair *col,
+				int x, int y, char *string, int len, int width);
+extern void MyFont_DrawString ( MyWindow *win, MyFont *font, ColorPair *col,
+			       int x, int y, char * string, int len);
+extern void MyFont_DrawStringEllipsis ( MyWindow *win, MyFont *font, ColorPair *col,
+				int x, int y, char *string, int len, int width);
+extern void MyFont_DrawShapeString ( Drawable mask, MyFont *font,
+			int x, int y, char * string, int len,
+			int offx, int offy);
+extern void MyFont_DrawShapeStringEllipsis ( Drawable mask, MyFont *font,
+			int x, int y, char * string, int len, int width,
+			int offx, int offy);
+extern Status I18N_FetchName ( Window win, char **winname);
+extern Status I18N_GetIconName ( Window win, char **iconname);
 extern void SetFocus ( TwmWindow *tmp_win, Time time );
 extern void Bell ( int type, int percent, Window win );
+
+#ifdef TWM_USE_XFT
+extern XftDraw * MyXftDrawCreate (Window win);
+extern void MyXftDrawDestroy (XftDraw *draw);
+extern void CopyPixelToXftColor (unsigned long pixel, XftColor *col);
+#endif
+#if defined TWM_USE_XFT || defined TWM_USE_RENDER
+extern void CopyPixelToXRenderColor (unsigned long pixel, XRenderColor *col);
+#endif
+#ifdef TWM_USE_RENDER
+Picture Create_Color_Pen (XRenderColor *color);
+#endif
+
+extern int ParsePanelIndex (char *name);
+extern int ParsePanelMoveType  (char *name);
+extern int ParsePanelZoomType  (char *name);
+
+#ifdef TILED_SCREEN
+extern int ComputeTiledAreaBoundingBox (struct ScreenInfo *scr);
+#endif
+#ifdef TWM_USE_XINERAMA
+extern int GetXineramaTilesGeometries (struct ScreenInfo *scr);
+#endif
+#ifdef TWM_USE_XRANDR
+extern int GetXrandrTilesGeometries (struct ScreenInfo *scr);
+#endif
+
+#ifdef TWM_USE_OPACITY	 /*opacity: 0 = transparent ... 255 = opaque*/
+extern void SetWindowOpacity (Window win, unsigned int opacity);
+extern void PropagateWindowOpacity (TwmWindow *tmp);
+#endif
 
 extern int HotX, HotY;
 

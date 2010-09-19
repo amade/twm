@@ -72,12 +72,28 @@ from The Open Group.
 #include <X11/Xfuncs.h>
 #include <X11/StringDefs.h>
 #include <X11/Intrinsic.h>
+#ifdef TWM_USE_XFT
+#include <X11/Xft/Xft.h>
+#endif
+#ifdef TWM_USE_XRANDR
+#include <X11/extensions/Xrandr.h>
+#endif
+#ifdef TWM_USE_RENDER
+#include <X11/extensions/Xrender.h>
+#endif
 
 #ifndef WithdrawnState
 #define WithdrawnState 0
 #endif
 
 #define PIXEL_ALREADY_TYPEDEFED		/* for Xmu/Drawing.h */
+
+#ifdef TWM_USE_RENDER
+#define TWM_USE_OPACITY
+#ifndef RepeatNormal
+#define RepeatNormal 1 /* some earlier versions lack this */
+#endif
+#endif
 
 #ifdef SIGNALRETURNSINT
 #define SIGNAL_T int
@@ -139,25 +155,41 @@ typedef SIGNAL_T (*SigProc)(int); /* type of function returned by signal() */
 /* defines for zooming/unzooming */
 #define ZOOM_NONE 0
 
-#define FB(fix_fore, fix_back)\
-    Gcv.foreground = fix_fore;\
-    Gcv.background = fix_back;\
-    XChangeGC(dpy, Scr->NormalGC, GCForeground|GCBackground,&Gcv)
+#define FB(scr, fore, back)	FBgc((scr)->NormalGC, fore, back)
+#define FBgc(gc, fore, back) \
+		(Gcv.foreground = (fore), Gcv.background = (back), \
+		XChangeGC(dpy, (gc), (GCForeground | GCBackground), &Gcv))
 
 typedef struct MyFont
 {
     char *name;			/* name of the font */
     XFontStruct *font;		/* font structure */
     XFontSet fontset;		/* fontset structure */
+#ifdef TWM_USE_XFT
+    XftFont *xft;		/* Xft font structure for Window XID */
+#endif
+    struct ScreenInfo *scr;	/* "Scr" back-pointer for runtime drawing */
     int height;			/* height of the font */
     int y;			/* Y coordinate to draw characters */
     int ascent;
     int descent;
+    int ellen;			/* width of ellipsis "..." in pixels */
 } MyFont;
+
+typedef struct MyWindow		/* MyFont/ColorPair text rendering */
+{
+    Window win;			/* Window XID */
+#ifdef TWM_USE_XFT
+    XftDraw *xft;		/* Xft draw context for Window XID */
+#endif
+} MyWindow;
 
 typedef struct ColorPair
 {
     Pixel fore, back;
+#ifdef TWM_USE_XFT
+    XftColor xft;		/* Xft text colour for Window XID */
+#endif
 } ColorPair;
 
 typedef struct _TitleButton {
@@ -232,10 +264,10 @@ typedef struct TwmWindow
     Window w;			/* the child window */
     int old_bw;			/* border width before reparenting */
     Window frame;		/* the frame window */
-    Window title_w;		/* the title bar window */
+    MyWindow title_w;		/* the title bar window */
     Window hilite_w;		/* the hilite window */
     Pixmap gray;
-    Window icon_w;		/* the icon window */
+    MyWindow icon_w;		/* the icon window */
     Window icon_bm_w;		/* the icon bitmap window */
     int frame_x;		/* x position of frame */
     int frame_y;		/* y position of frame */
@@ -267,11 +299,18 @@ typedef struct TwmWindow
     /***********************************************************************
      * color definitions per window
      **********************************************************************/
-    Pixel border;		/* border color */
-    Pixel icon_border;		/* border color */
-    ColorPair border_tile;
-    ColorPair title;
-    ColorPair iconc;
+    Pixel BorderColor;		/* border color */
+    Pixel IconBorderColor;	/* icon border color */
+    Pixel IconBitmapColor;	/* icon bitmap (foreground) color */
+    ColorPair TitleButtonC;	/* titlebar button bitmap fore/back color */
+    ColorPair TitleHighlightC;	/* title/focus highlight color */
+    ColorPair BorderTileC;
+    ColorPair TitleC;
+    ColorPair IconC;
+#ifdef TWM_USE_RENDER
+    Picture PicIconB;		/* icon_w translucent shape */
+    Picture PenIconB;		/* icon_w background color */
+#endif
     short iconified;		/* has the window ever been iconified? */
     short icon;			/* is the window an icon now ? */
     short icon_on;		/* is the icon visible */
@@ -287,6 +326,7 @@ typedef struct TwmWindow
     short transient;		/* this is a transient window */
     Window transientfor;	/* window contained in XA_XM_TRANSIENT_FOR */
     short titlehighlight;	/* should I highlight the title bar */
+    short ClientBorderWidth;	/* respect this client window border width */
     struct IconMgr *iconmgrp;	/* pointer to it if this is an icon manager */
     int save_frame_x;		/* x position of frame */
     int save_frame_y;		/* y position of frame */
@@ -300,7 +340,6 @@ typedef struct TwmWindow
     SqueezeInfo *squeeze_info;	/* should the title be squeezed? */
     struct {
 	struct TwmWindow *next, *prev;
-	Bool cursor_valid;
 	int curs_x, curs_y;
     } ring;
 
@@ -362,6 +401,9 @@ extern XtAppContext appContext;
 extern Window ResizeWindow;	/* the window we are resizing */
 extern int HasShape;		/* this server supports Shape extension */
 extern int HasSync;		/* this server supports SYNC extension */
+#ifdef TWM_USE_XINERAMA
+extern int HasXinerama;		/* this server supports XINERAMA extension? */
+#endif
 
 extern int PreviousScreen;
 
@@ -396,8 +438,8 @@ extern int Argc;
 extern char **Argv;
 extern void NewFontCursor ( Cursor *cp, char *str );
 extern void NewBitmapCursor ( Cursor *cp, char *source, char *mask );
-extern Pixmap CreateMenuIcon ( int height, unsigned int *widthp, unsigned int *heightp );
 
+extern int  PrintErrorMessages;
 extern Bool ErrorOccurred;
 extern XErrorEvent LastErrorEvent;
 
@@ -421,6 +463,23 @@ extern Bool use_fontset;
 extern int ShapeEventBase;
 extern int ShapeErrorBase;
 
+#ifdef TWM_USE_XRANDR
+extern int HasXrandr;
+extern int XrandrEventBase;
+#endif
+
+extern TwmWindow *Focus;
+extern short FocusRoot;
+
+#ifdef TWM_USE_SLOPPYFOCUS
+extern short SloppyFocus;
+#endif
+#ifdef TWM_USE_SLOPPYFOCUS
+#define TWM_ENABLE_STOLENFOCUS_RECOVERY
+#endif
+extern int RecoverStolenFocusAttempts;
+extern int RecoverStolenFocusTimeout;
+
 #define _XA_MIT_PRIORITY_COLORS		TwmAtoms[0]
 #define _XA_WM_CHANGE_STATE		TwmAtoms[1]
 #define _XA_WM_STATE			TwmAtoms[2]
@@ -432,5 +491,9 @@ extern int ShapeErrorBase;
 #define _XA_SM_CLIENT_ID		TwmAtoms[8]
 #define _XA_WM_CLIENT_LEADER		TwmAtoms[9]
 #define _XA_WM_WINDOW_ROLE		TwmAtoms[10]
+
+#ifdef TWM_USE_OPACITY
+extern Atom _XA_NET_WM_WINDOW_OPACITY;
+#endif
 
 #endif /* _TWM_ */

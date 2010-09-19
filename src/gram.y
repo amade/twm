@@ -89,6 +89,8 @@ static void GotTitleButton ( char *bitmapname, int func, Bool rightside );
 static Bool CheckWarpScreenArg ( char *s );
 static Bool CheckWarpRingArg ( char *s );
 static Bool CheckColormapArg ( char *s );
+static Bool CheckSwapIconMgrEntryArg ( char *s );
+static Bool CheckGeometryTranslation ( char *s, int *x, int *y );
 
 static char *ptr;
 static name_list **list;
@@ -108,17 +110,18 @@ extern int yylineno;
 
 %token <num> LB RB LP RP MENUS MENU BUTTON DEFAULT_FUNCTION PLUS MINUS
 %token <num> ALL OR CURSORS PIXMAPS ICONS COLOR SAVECOLOR MONOCHROME FUNCTION 
-%token <num> ICONMGR_SHOW ICONMGR WINDOW_FUNCTION ZOOM ICONMGRS
-%token <num> ICONMGR_GEOMETRY ICONMGR_NOSHOW MAKE_TITLE GRAYSCALE
-%token <num> ICONIFY_BY_UNMAPPING DONT_ICONIFY_BY_UNMAPPING 
-%token <num> NO_TITLE AUTO_RAISE NO_HILITE ICON_REGION 
+%token <num> ICONMGR_SHOW ICONMGR WINDOW_FUNCTION ZOOM ZOOMSTATE ICONMGRS
+%token <num> ICONMGR_GEOMETRY ICONMGR_NOSHOW SHOW_ICONMANAGER MAKE_TITLE GRAYSCALE
+%token <num> ICONIFY_BY_UNMAPPING DONT_ICONIFY_BY_UNMAPPING DECORATE_TRANSIENTS
+%token <num> NO_TITLE NO_DECORATE_TRANSIENTS AUTO_RAISE NO_HILITE ICON_REGION
 %token <num> META SHIFT LOCK CONTROL WINDOW TITLE ICON ROOT FRAME 
 %token <num> COLON EQUALS SQUEEZE_TITLE DONT_SQUEEZE_TITLE
-%token <num> START_ICONIFIED NO_TITLE_HILITE TITLE_HILITE
+%token <num> START_ICONIFIED NO_TITLE_HILITE TITLE_HILITE BORDER_PIXMAP
 %token <num> MOVE RESIZE WAIT SELECT KILL LEFT_TITLEBUTTON RIGHT_TITLEBUTTON 
 %token <num> NUMBER KEYWORD NKEYWORD CKEYWORD CLKEYWORD FKEYWORD FSKEYWORD 
-%token <num> SKEYWORD DKEYWORD JKEYWORD WINDOW_RING WARP_CURSOR ERRORTOKEN
-%token <num> NO_STACKMODE
+%token <num> SKEYWORD DKEYWORD JKEYWORD WINDOW_RING NO_WINDOW_RING WARP_CURSOR NO_WARP_CURSOR
+%token <num> CLIENT_BORDERWIDTH NO_CLIENT_BORDERWIDTH RANDOM_PLACEMENT NO_RANDOM_PLACEMENT
+%token <num> ERRORTOKEN NO_STACKMODE SHAPED_ICON_LABELS SHAPED_ICONMGR_LABELS
 %token <ptr> STRING 
 
 %type <ptr> string
@@ -144,12 +147,40 @@ stmt		: error
 		| squeeze
 		| ICON_REGION string DKEYWORD DKEYWORD number number
 					{ AddIconRegion($2, $3, $4, $5, $6); }
-		| ICONMGR_GEOMETRY string number	{ if (Scr->FirstTime)
-						  {
-						    Scr->iconmgr.geometry=$2;
-						    Scr->iconmgr.columns=$3;
-						  }
+		| ICONMGR_GEOMETRY string signed_number DKEYWORD DKEYWORD
+					{
+					    if (Scr->FirstTime) {
+						Scr->iconmgr.geometry=$2;
+						if ($3 < 0) {
+						    Scr->iconmgr.reversed = TRUE;
+						    Scr->iconmgr.columns = -($3);
+						} else if ($3 > 0) {
+						    Scr->iconmgr.reversed = FALSE;
+						    Scr->iconmgr.columns = +($3);
 						}
+						if (($4 == D_WEST) || ($5 == D_WEST))
+						    Scr->iconmgr.Xnegative = TRUE;
+						else
+						    Scr->iconmgr.Xnegative = FALSE;
+						if (($4 == D_NORTH) || ($5 == D_NORTH))
+						    Scr->iconmgr.Ynegative = TRUE;
+						else
+						    Scr->iconmgr.Ynegative = FALSE;
+					    }
+					}
+		| ICONMGR_GEOMETRY string signed_number
+					{
+					    if (Scr->FirstTime) {
+						Scr->iconmgr.geometry=$2;
+						if ($3 < 0) {
+						    Scr->iconmgr.reversed = TRUE;
+						    Scr->iconmgr.columns = -($3);
+						} else if ($3 > 0) {
+						    Scr->iconmgr.reversed = FALSE;
+						    Scr->iconmgr.columns = +($3);
+						}
+					    }
+					}
 		| ICONMGR_GEOMETRY string	{ if (Scr->FirstTime)
 						    Scr->iconmgr.geometry = $2;
 						}
@@ -204,6 +235,11 @@ stmt		: error
 		  iconm_list
 		| ICONMGR_SHOW		{ list = &Scr->IconMgrShow; }
 		  win_list
+		| SHOW_ICONMANAGER	{ if (Scr->FirstTime)
+					    Scr->ShowIconManager = TRUE; }
+		| SHOW_ICONMANAGER	{ list = &Scr->ShowIconManagerL; }
+		  win_list		{ if (Scr->FirstTime && Scr->ShowIconManagerL == NULL)
+					    Scr->ShowIconManager = TRUE; }
 		| NO_TITLE_HILITE	{ list = &Scr->NoTitleHighlight; }
 		  win_list
 		| NO_TITLE_HILITE	{ if (Scr->FirstTime)
@@ -212,6 +248,12 @@ stmt		: error
 		  win_list
 		| NO_HILITE		{ if (Scr->FirstTime)
 						Scr->Highlight = FALSE; }
+		| CLIENT_BORDERWIDTH	{ list = &Scr->ClientBorderWidthL; }
+		  win_list
+		| CLIENT_BORDERWIDTH	{ if (Scr->FirstTime)
+					    Scr->ClientBorderWidth = TRUE; }
+		| NO_CLIENT_BORDERWIDTH	{ list = &Scr->NoClientBorderWidthL; }
+		  win_list
 		| NO_STACKMODE		{ list = &Scr->NoStackModeL; }
 		  win_list
 		| NO_STACKMODE		{ if (Scr->FirstTime)
@@ -221,6 +263,12 @@ stmt		: error
 		| NO_TITLE		{ if (Scr->FirstTime)
 						Scr->NoTitlebar = TRUE; }
 		| MAKE_TITLE		{ list = &Scr->MakeTitle; }
+		  win_list
+		| DECORATE_TRANSIENTS	{ list = &Scr->DecorateTransientsL; }
+		  win_list
+		| DECORATE_TRANSIENTS	{ if (Scr->FirstTime)
+					    Scr->DecorateTransients = TRUE; }
+		| NO_DECORATE_TRANSIENTS	{ list = &Scr->NoDecorateTransientsL; }
 		  win_list
 		| START_ICONIFIED	{ list = &Scr->StartIconified; }
 		  win_list
@@ -235,6 +283,57 @@ stmt		: error
 		  function
 		| ICONS 		{ list = &Scr->IconNames; }
 		  icon_list
+		| SHAPED_ICON_LABELS STRING {
+					    if (CheckGeometryTranslation ($2,
+							&Scr->IconLabelOffsetX,
+							&Scr->IconLabelOffsetY)
+						    == True)
+					    {
+						if (HasShape)
+						    Scr->ShapedIconLabels = TRUE;
+					    }
+					    else
+					    {
+						twmrc_error_prefix();
+						fprintf (stderr,
+		"ignoring invalid icon label shadow offset \"%s\"\n", $2);
+					    }
+					}
+		| SHAPED_ICONMGR_LABELS STRING {
+#ifdef TWM_USE_RENDER
+					    /*
+					     * Dirty dancing:
+					     * This is temporary ugly trick to
+					     * dynamically turn off icon manager
+					     * shapes if Xorg-xcompmgr is running
+					     * as it has problems with the Shape
+					     * extension.  Someday this trick here
+					     * should be removed if this issue is
+					     * resolved.
+					     * Usage: activate in .twmrc by e.g.
+					     * ShapedIconManagerLabels "0x0+1-1"
+					     */
+					    extern Window DragWindow;
+					    DragWindow &= 0x1; /*trick twm.c*/
+#endif
+					    if (CheckGeometryTranslation ($2,
+							&Scr->IconMgrLabelOffsetX,
+							&Scr->IconMgrLabelOffsetY)
+						    == True)
+					    {
+						if (HasShape)
+#ifdef TWM_USE_RENDER
+						  if (DragWindow != (0x1|0x2)) /*trick twm.c*/
+#endif
+						    Scr->ShapedIconMgrLabels = TRUE;
+					    }
+					    else
+					    {
+						twmrc_error_prefix();
+						fprintf (stderr,
+		"ignoring invalid icon mgr label shadow offset \"%s\"\n", $2);
+					    }
+					}
 		| COLOR 		{ color = COLOR; }
 		  color_list
 		| GRAYSCALE 		{ color = GRAYSCALE; }
@@ -271,8 +370,37 @@ stmt		: error
 		  win_list
 		| WARP_CURSOR		{ if (Scr->FirstTime) 
 					    Scr->WarpCursor = TRUE; }
+		| NO_WARP_CURSOR	{ list = &Scr->NoWarpCursorL; }
+		  win_list
 		| WINDOW_RING		{ list = &Scr->WindowRingL; }
 		  win_list
+		| NO_WINDOW_RING	{ list = &Scr->NoWindowRingL; }
+		  win_list
+		| RANDOM_PLACEMENT	{ list = &Scr->RandomPlacementL; }
+		  win_list
+		| RANDOM_PLACEMENT	{ if (Scr->FirstTime)
+					    Scr->RandomPlacement = TRUE; }
+		| NO_RANDOM_PLACEMENT	{ list = &Scr->NoRandomPlacementL; }
+		  win_list
+		| ZOOMSTATE string {
+					    int func;
+					    char *panel_name = strchr (($2), '@');
+					    if (panel_name != NULL)
+						*panel_name++ = '\0';
+					    func = ParsePanelZoomType ($2);
+					    if (func == F_PANELGEOMETRYZOOM)
+					    {
+						twmrc_error_prefix();
+						fprintf (stderr,
+							"ignoring invalid ZoomState argument\n");
+					    }
+					    else
+					    {
+						Scr->ZoomFunc = func;
+						if (panel_name != NULL)
+						    Scr->ZoomPanel = ParsePanelIndex (panel_name);
+					    }
+					}
 		;
 
 
@@ -375,6 +503,7 @@ pixmap_entries	: /* Empty */
 		;
 
 pixmap_entry	: TITLE_HILITE string { SetHighlightPixmap ($2); }
+		| BORDER_PIXMAP string { SetBorderPixmap ($2); }
 		;
 
 
@@ -522,16 +651,28 @@ iconm_entries	: /* Empty */
 		| iconm_entries iconm_entry
 		;
 
-iconm_entry	: string string number	{ if (Scr->FirstTime)
+iconm_entry	: string string signed_number	{ if (Scr->FirstTime)
 					    AddToList(list, $1, (char *)
 						AllocateIconManager($1, NULLSTR,
-							$2,$3));
+							$2,$3, D_EAST, D_SOUTH));
 					}
-		| string string string number
+		| string string signed_number DKEYWORD DKEYWORD
+					{ if (Scr->FirstTime)
+					    AddToList(list, $1, (char *)
+						AllocateIconManager($1, NULLSTR,
+						$2, $3, $4, $5));
+					}
+		| string string string signed_number
 					{ if (Scr->FirstTime)
 					    AddToList(list, $1, (char *)
 						AllocateIconManager($1,$2,
-						$3, $4));
+						$3, $4, D_EAST, D_SOUTH));
+					}
+		| string string string signed_number DKEYWORD DKEYWORD
+					{ if (Scr->FirstTime)
+					    AddToList(list, $1, (char *)
+						AllocateIconManager($1,$2,
+						$3, $4, $5, $6));
 					}
 		;
 
@@ -599,6 +740,15 @@ action		: FKEYWORD	{ $$ = $1; }
 				    pull = GetRoot ($2, NULLSTR,NULLSTR);
 				    pull->prev = root;
 				    break;
+				  case F_SWAPICONMGRENTRY:
+				    if (!CheckSwapIconMgrEntryArg (Action)) {
+					twmrc_error_prefix();
+					fprintf (stderr,
+			"ignoring invalid f.swapiconmgrentry argument \"%s\"\n",
+						 Action);
+					$$ = F_NOP;
+				    }
+				    break;
 				  case F_WARPRING:
 				    if (!CheckWarpRingArg (Action)) {
 					twmrc_error_prefix();
@@ -607,6 +757,7 @@ action		: FKEYWORD	{ $$ = $1; }
 						 Action);
 					$$ = F_NOP;
 				    }
+				    break;
 				  case F_WARPTOSCREEN:
 				    if (!CheckWarpScreenArg (Action)) {
 					twmrc_error_prefix();
@@ -625,6 +776,32 @@ action		: FKEYWORD	{ $$ = $1; }
 			"ignoring invalid f.colormap argument \"%s\"\n", 
 						 Action);
 					$$ = F_NOP;
+				    }
+				    break;
+				  case F_PANELMOVE:
+				  case F_PANELZOOM:
+				    {
+					int func;
+					char *panel_name = strchr (($2), '@');
+					if (panel_name != NULL)
+					    *panel_name = '\0';
+					if (($1) == F_PANELMOVE)
+					    func = ParsePanelMoveType ($2);
+					else
+					    func = ParsePanelZoomType ($2);
+					if (func == F_PANELGEOMETRYMOVE || func == F_PANELGEOMETRYZOOM)
+					{
+					    if (panel_name != NULL)
+						*panel_name = '@'; /*restore full specification*/
+					}
+					else
+					{
+					    if (panel_name != NULL)
+						Action = panel_name+1; /*pass on panel specification*/
+					    else
+						Action = "";
+					}
+					$$ = func;
 				    }
 				    break;
 				} /* end switch */
@@ -765,8 +942,8 @@ static MenuRoot *GetRoot(char *name, char* fore, char *back)
 
 	save = Scr->FirstTime;
 	Scr->FirstTime = TRUE;
-	GetColor(COLOR, &tmp->hi_fore, fore);
-	GetColor(COLOR, &tmp->hi_back, back);
+	GetColor(COLOR, &tmp->MenuHiC.fore, fore);
+	GetColor(COLOR, &tmp->MenuHiC.back, back);
 	Scr->FirstTime = save;
     }
 
@@ -782,6 +959,13 @@ static void GotButton(int butt, int func)
 	if ((cont & (1 << i)) == 0)
 	    continue;
 
+#ifdef DEBUG_HOTBUTTONS
+	if (PrintErrorMessages) {
+	    static int cnt = 1;
+	    extern char *return_keyword(), *return_context(), *return_modifiers();
+	    fprintf (stderr, "gram.y: %2d. Registering Button%d twm-mod '%s (twm-used = 0x0%x)' function '%s (%d)' arg = '%s' for context '%s'\n", cnt++, butt, return_modifiers(mods), (mods_used|mods), return_keyword(func), func, (Action?Action:""), return_context(i));
+	}
+#endif
 	Scr->Mouse[butt][i][mods].func = func;
 	if (func == F_MENU)
 	{
@@ -834,6 +1018,19 @@ static void GotTitleButton (char *bitmapname, int func, Bool rightside)
     pull = NULL;
 }
 
+
+static Bool CheckSwapIconMgrEntryArg (char *s)
+{
+    XmuCopyISOLatin1Lowered (s, s);
+
+    if (strcmp (s,  WARPSCREEN_NEXT) == 0 ||
+	strcmp (s,  WARPSCREEN_PREV) == 0)
+      return True;
+
+    return False;
+}
+
+
 static Bool CheckWarpScreenArg (char *s)
 {
     XmuCopyISOLatin1Lowered (s, s);
@@ -868,6 +1065,30 @@ static Bool CheckColormapArg (char *s)
 	strcmp (s, COLORMAP_PREV) == 0 ||
 	strcmp (s, COLORMAP_DEFAULT) == 0)
       return True;
+
+    return False;
+}
+
+
+static Bool CheckGeometryTranslation (char *s, int *x, int *y)
+{
+    int mask, i, j;
+    unsigned w, h;
+
+    RemoveDQuote (s);
+    mask = XParseGeometry (s, &i, &j, &w, &h);
+#ifdef TWM_USE_RENDER
+    if ((mask & WidthValue) && (mask & HeightValue))
+    {
+	extern Window DragWindow;
+	DragWindow |= 0x2; /* dirty-dancing: shape-off trick due to xcompmgr/Shape in twm.c */
+    }
+#endif
+    if ((mask & XValue) && (mask & YValue)) {
+	(*x) = i;
+	(*y) = j;
+	return True;
+    }
 
     return False;
 }

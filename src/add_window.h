@@ -64,12 +64,18 @@ in this Software without prior written authorization from The Open Group.
 #ifndef _ADD_WINDOW_
 #define _ADD_WINDOW_
 
-#include "iconmgr.h"
+typedef struct _PlaceXY_ {
+    struct _PlaceXY_ *next;
+    int x, y, width, height;
+} PlaceXY;
+
+extern int FindEmptyArea (TwmWindow *lst, TwmWindow *twm, PlaceXY *areas, PlaceXY *pos);
 
 extern char NoName[];
 
 extern void AddDefaultBindings ( void );
 extern TwmWindow * AddWindow ( Window w, int iconm, IconMgr *iconp );
+extern ColormapWindow * CreateColormapWindowAttr ( Window w, XWindowAttributes *attr, Bool creating_parent, Bool property_window );
 extern ColormapWindow * CreateColormapWindow ( Window w, Bool creating_parent, Bool property_window );
 extern TwmColormap * CreateTwmColormap ( Colormap c );
 extern void FetchWmColormapWindows ( TwmWindow *tmp );
@@ -80,10 +86,16 @@ extern void GrabButtons ( TwmWindow *tmp_win );
 extern void GrabKeys ( TwmWindow *tmp_win );
 extern int MappedNotOverride ( Window w );
 extern void SetHighlightPixmap ( char *filename );
+extern void SetBorderPixmap ( char *filename );
 extern int AddingX;	
 extern int AddingY;
 extern int AddingW;
 extern int AddingH;
+
+#define IS_TRANSIENT_OF(tmp,win)	((tmp)->transient == TRUE && (tmp)->transientfor == (win)->w)
+#define IS_TRANSIENT_RELATED(tmp,win)	(IS_TRANSIENT_OF(tmp,win)  || IS_TRANSIENT_OF(win,tmp))
+#define IS_GROUP_RELATED(tmp,win)	((tmp)->group == (win)->group)
+#define IS_RELATED_WIN(tmp,win)		(IS_GROUP_RELATED(tmp,win) || IS_TRANSIENT_RELATED(tmp,win))
 
 #endif /* _ADD_WINDOW_ */
 
